@@ -36,15 +36,28 @@ async def get_db_pool() -> asyncpg.Pool:
     if db_pool is None:
         postgres_url = os.getenv("POSTGRES_URL")
         if not postgres_url:
+            print("ERROR: POSTGRES_URL environment variable is not set")
             raise ValueError("POSTGRES_URL environment variable is not set")
-        db_pool = await asyncpg.create_pool(postgres_url)
+        try:
+            print(f"Connecting to database...")
+            db_pool = await asyncpg.create_pool(postgres_url, min_size=1, max_size=10)
+            print(f"✅ Database connection pool created successfully")
+        except Exception as e:
+            print(f"ERROR: Failed to create database connection pool: {e}")
+            raise
     return db_pool
 
 
 @app.on_event("startup")
 async def startup():
     """Initialize database pool on startup"""
-    await get_db_pool()
+    try:
+        await get_db_pool()
+        print("✅ Application startup completed")
+    except Exception as e:
+        print(f"❌ Application startup failed: {e}")
+        # Don't raise here, let the service start and handle errors in endpoints
+        pass
 
 
 @app.on_event("shutdown")
@@ -52,7 +65,11 @@ async def shutdown():
     """Close database pool on shutdown"""
     global db_pool
     if db_pool:
-        await db_pool.close()
+        try:
+            await db_pool.close()
+            print("✅ Database connection pool closed")
+        except Exception as e:
+            print(f"Error closing database pool: {e}")
 
 
 class WarehouseItem:
