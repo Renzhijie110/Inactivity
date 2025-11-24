@@ -299,7 +299,7 @@ async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]
                 # Use executemany for batch insert
                 await conn.executemany(
                     """
-                    INSERT INTO recent_inactivity_records (
+                    INSERT INTO recent_inactivity_data (
                         id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
                         status, current_status, last_refresh_status, last_refresh_time, record_status,
                         case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
@@ -344,7 +344,7 @@ async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]
 
                 # Fetch inserted items
                 rows = await conn.fetch(
-                    "SELECT id, tracking_number FROM recent_inactivity_records WHERE id = ANY($1)",
+                    "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = ANY($1)",
                     [item.id for item in batch]
                 )
                 inserted_items.extend([dict(row) for row in rows])
@@ -361,7 +361,7 @@ async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]
                     try:
                         await conn.execute(
                             """
-                            INSERT INTO recent_inactivity_records (
+                            INSERT INTO recent_inactivity_data (
                                 id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
                                 status, current_status, last_refresh_status, last_refresh_time, record_status,
                                 case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
@@ -412,7 +412,7 @@ async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]
                             item.updated_during_grace_period, item.week_number
                         )
                         row = await conn.fetchrow(
-                            "SELECT id, tracking_number FROM recent_inactivity_records WHERE id = $1",
+                            "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = $1",
                             item.id
                         )
                         if row:
@@ -497,7 +497,7 @@ async def get_warehouse_items(
         offset = (page - 1) * page_size
         
         # Get total count
-        count_query = f"SELECT COUNT(*) FROM recent_inactivity_records {where_clause}"
+        count_query = f"SELECT COUNT(*) FROM recent_inactivity_data {where_clause}"
         async with pool.acquire() as conn:
             if params:
                 total_count = await conn.fetchval(count_query, *params)
@@ -508,7 +508,7 @@ async def get_warehouse_items(
             limit_param = "$" + str(param_num)
             offset_param = "$" + str(param_num + 1)
             data_query = f"""
-                SELECT * FROM recent_inactivity_records 
+                SELECT * FROM recent_inactivity_data 
                 {where_clause}
                 ORDER BY {sort_by} {order.upper()}
                 LIMIT {limit_param} OFFSET {offset_param}
@@ -524,7 +524,7 @@ async def get_warehouse_items(
         if not warehouse:
             async with pool.acquire() as conn:
                 stats_rows = await conn.fetch(
-                    "SELECT warehouse, COUNT(*) as count FROM recent_inactivity_records GROUP BY warehouse"
+                    "SELECT warehouse, COUNT(*) as count FROM recent_inactivity_data GROUP BY warehouse"
                 )
                 warehouse_stats = {row["warehouse"]: row["count"] for row in stats_rows}
         
@@ -562,7 +562,7 @@ async def get_warehouses():
         pool = await get_db_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT warehouse, COUNT(*) as count FROM recent_inactivity_records GROUP BY warehouse ORDER BY warehouse"
+                "SELECT warehouse, COUNT(*) as count FROM recent_inactivity_data GROUP BY warehouse ORDER BY warehouse"
             )
             warehouses = [{"code": row["warehouse"], "count": row["count"]} for row in rows]
         
@@ -601,7 +601,7 @@ async def sync_warehouse_data():
         print("🗄️ Fetching existing data from database...")
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM recent_inactivity_records")
+            rows = await conn.fetch("SELECT * FROM recent_inactivity_data")
             existing_data = [WarehouseItem(dict(row)) for row in rows]
         print(f"📊 Found {len(existing_data)} existing items in database")
 
@@ -627,7 +627,7 @@ async def sync_warehouse_data():
             print("🗑️ Clearing existing data from database...")
             pool = await get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM recent_inactivity_records")
+                await conn.execute("DELETE FROM recent_inactivity_data")
             print("✅ Database cleared successfully")
 
             # 6. Batch insert deduplicated complete data
