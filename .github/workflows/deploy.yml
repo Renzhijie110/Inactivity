@@ -3,20 +3,30 @@ on:
   push:
     branches:
       - main
-
-jobs:
   deploy:
     name: Deploy to EC2
     runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && 'production' }}
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@v3
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+#
       - name: Deploy to EC2
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
         run: |
           BRANCH_NAME="${GITHUB_REF##*/}"
@@ -74,6 +84,11 @@ jobs:
 
           # create .env file (use environment variables)
           cat > .env <<ENVEOF
+          DB_HOST=$DB_HOST
+          DB_PORT=$DB_PORT
+          DB_USER=$DB_USER
+          DB_PASSWORD=$DB_PASSWORD
+          DB_NAME=$DB_NAME
           POSTGRES_URL=$POSTGRES_URL
           ENVEOF
 
@@ -233,5 +248,10 @@ jobs:
             "DEPLOY_PATH='$DEPLOY_PATH' \
              BRANCH_NAME='$BRANCH_NAME' \
              GH_TOKEN='$GH_TOKEN' \
+             DB_HOST='$DB_HOST' \
+             DB_PORT='$DB_PORT' \
+             DB_USER='$DB_USER' \
+             DB_PASSWORD='$DB_PASSWORD' \
+             DB_NAME='$DB_NAME' \
              POSTGRES_URL='$POSTGRES_URL' \
              bash /tmp/deploy_script.sh && rm /tmp/deploy_script.sh"
