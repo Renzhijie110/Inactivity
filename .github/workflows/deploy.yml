@@ -22,11 +22,6 @@ on:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_PORT: ${{ secrets.DB_PORT }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME }}
           POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
         run: |
           BRANCH_NAME="${GITHUB_REF##*/}"
@@ -39,12 +34,12 @@ on:
           set -e
 
           if [ ! -d "$DEPLOY_PATH" ]; then
-            git clone https://${GH_TOKEN}@github.com/Renzhijie110/uniuni-us-dashboard.git $DEPLOY_PATH
+            git clone https://${GH_TOKEN}@github.com/Renzhijie110/Inactivity.git $DEPLOY_PATH
           fi
           cd $DEPLOY_PATH
 
           # configure git to use token (for fetch and pull)
-          git remote set-url origin https://${GH_TOKEN}@github.com/Renzhijie110/uniuni-us-dashboard.git
+          git remote set-url origin https://${GH_TOKEN}@github.com/Renzhijie110/Inactivity.git
 
           git fetch origin
           git checkout $BRANCH_NAME || git checkout -b $BRANCH_NAME origin/$BRANCH_NAME
@@ -84,11 +79,6 @@ on:
 
           # create .env file (use environment variables)
           cat > .env <<ENVEOF
-          DB_HOST=$DB_HOST
-          DB_PORT=$DB_PORT
-          DB_USER=$DB_USER
-          DB_PASSWORD=$DB_PASSWORD
-          DB_NAME=$DB_NAME
           POSTGRES_URL=$POSTGRES_URL
           ENVEOF
 
@@ -248,10 +238,5 @@ on:
             "DEPLOY_PATH='$DEPLOY_PATH' \
              BRANCH_NAME='$BRANCH_NAME' \
              GH_TOKEN='$GH_TOKEN' \
-             DB_HOST='$DB_HOST' \
-             DB_PORT='$DB_PORT' \
-             DB_USER='$DB_USER' \
-             DB_PASSWORD='$DB_PASSWORD' \
-             DB_NAME='$DB_NAME' \
              POSTGRES_URL='$POSTGRES_URL' \
              bash /tmp/deploy_script.sh && rm /tmp/deploy_script.sh"
