@@ -1,0 +1,228 @@
+name: EC2 Auto Deploy (Prod)
+on:
+  push:
+    branches:
+      - main
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          POSTGRES_URL: ${{ secrets.POSTGRES_URL }}
+        run: |
+          BRANCH_NAME="${GITHUB_REF##*/}"
+          if [ "$BRANCH_NAME" = "main" ]; then
+            DEPLOY_PATH="/home/${{ secrets.EC2_USER }}/myproject-prod"
+          fi
+
+          # create temporary script file to avoid special characters problem
+          cat > /tmp/deploy_script.sh <<'SCRIPT_EOF'
+          set -e
+
+          if [ ! -d "$DEPLOY_PATH" ]; then
+            git clone https://${GH_TOKEN}@github.com/Renzhijie110/uniuni-us-dashboard.git $DEPLOY_PATH
+          fi
+          cd $DEPLOY_PATH
+
+          # configure git to use token (for fetch and pull)
+          git remote set-url origin https://${GH_TOKEN}@github.com/Renzhijie110/uniuni-us-dashboard.git
+
+          git fetch origin
+          git checkout $BRANCH_NAME || git checkout -b $BRANCH_NAME origin/$BRANCH_NAME
+          git reset --hard origin/$BRANCH_NAME
+          git clean -fd
+
+          # Backend deployment
+          cd backend
+          
+          # check if the virtual environment is complete (check activate file)
+          if [ -d "venv" ] && [ ! -f "venv/bin/activate" ]; then
+            echo "Removing incomplete virtual environment..."
+            rm -rf venv
+          fi
+          
+          # get Python version and install the corresponding venv package
+          if [ ! -f "venv/bin/activate" ]; then
+            PYTHON_VERSION=$(python3 --version | grep -oP '\d+\.\d+')
+            echo "Python version: $PYTHON_VERSION"
+            echo "Installing python${PYTHON_VERSION}-venv..."
+            
+            sudo apt update
+            sudo apt install -y python${PYTHON_VERSION}-venv python3-pip
+            
+            echo "Creating virtual environment..."
+            rm -rf venv
+            python3 -m venv venv
+            
+            if [ ! -f "venv/bin/activate" ]; then
+              echo "ERROR: Failed to create virtual environment!"
+              exit 1
+            fi
+          fi
+          
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+          # create .env file (use environment variables)
+          cat > .env <<ENVEOF
+          POSTGRES_URL=$POSTGRES_URL
+          ENVEOF
+
+          # create or update systemd service file
+          SERVICE_NAME="uniuni-backend-$BRANCH_NAME"
+          SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+          
+          # determine port (main=8000)
+          if [ "$BRANCH_NAME" = "main" ]; then
+            PORT=8000
+          fi
+          
+          # create service file
+          sudo tee $SERVICE_FILE > /dev/null <<SERVICEEOF
+          [Unit]
+          Description=UniUni Backend API Service ($BRANCH_NAME)
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=$USER
+          WorkingDirectory=$DEPLOY_PATH/backend
+          Environment="PATH=$DEPLOY_PATH/backend/venv/bin"
+          ExecStart=$DEPLOY_PATH/backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT
+          Restart=always
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICEEOF
+
+          # reload systemd and start service
+          sudo systemctl daemon-reload
+          sudo systemctl enable $SERVICE_NAME
+          sudo systemctl restart $SERVICE_NAME
+          
+          # check service status
+          if sudo systemctl is-active --quiet $SERVICE_NAME; then
+            echo "Service $SERVICE_NAME started successfully!"
+          else
+            echo "Service $SERVICE_NAME failed to start"
+            sudo systemctl status $SERVICE_NAME
+            exit 1
+          fi
+
+          # Frontend build
+          cd ../frontend
+          
+          # install Node.js
+          # check if Node.js is installed
+          if ! command -v node &> /dev/null; then
+            echo "Installing Node.js..."
+            curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          else
+            echo "Node.js version: $(node --version)"
+          fi
+    
+          
+          # ensure npm is available
+          if ! command -v npm &> /dev/null; then
+            echo "ERROR: npm not found!"
+            exit 1
+          fi
+          
+          echo "Building frontend..."
+          npm ci
+          
+          # clean old dist directory (if there is a permission problem, use sudo)
+          if [ -d "dist" ]; then
+            rm -rf dist || sudo rm -rf dist
+          fi
+          
+          npm run build
+          
+          # deploy static files to standard web directory
+          echo "Deploying static files to /var/www..."
+          WEB_ROOT="/var/www/uniuni-$BRANCH_NAME"
+          
+          # create web directory (if not exists)
+          sudo mkdir -p $WEB_ROOT
+          
+          # clean old files and copy new files
+          sudo rm -rf $WEB_ROOT/*
+          sudo cp -r dist/* $WEB_ROOT/
+          
+          # set correct ownership and permissions
+          sudo chown -R www-data:www-data $WEB_ROOT
+          sudo chmod -R 755 $WEB_ROOT
+
+          # configure and start Nginx
+          echo "Configuring Nginx..."
+          
+          # check if Nginx is installed
+          if ! command -v nginx &> /dev/null; then
+            echo "Installing Nginx..."
+            sudo apt update
+            sudo apt install -y nginx
+          fi
+          
+          # create Nginx configuration file
+          NGINX_CONF="/etc/nginx/sites-available/uniuni-$BRANCH_NAME"
+          
+          sudo tee $NGINX_CONF > /dev/null <<NGINXEOF
+          server {
+              listen 80;
+              server_name _;
+              
+              # frontend static files
+              location / {
+                  root $WEB_ROOT;
+                  try_files \$uri \$uri/ /index.html;
+              }
+
+              # index.html not cache, resources long cache
+              location = /index.html {
+                  root $WEB_ROOT;
+                  add_header Cache-Control "no-cache, no-store, must-revalidate";
+              }
+              location /assets/ {
+                  root $WEB_ROOT;
+                  add_header Cache-Control "public, max-age=31536000, immutable";
+              }
+              
+              # backend API
+              location /api {
+                  proxy_pass http://127.0.0.1:$PORT;
+                  proxy_set_header Host \$host;
+                  proxy_set_header X-Real-IP \$remote_addr;
+                  proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto \$scheme;
+              }
+          }
+          NGINXEOF
+
+          # enable configuration
+          sudo ln -sf $NGINX_CONF /etc/nginx/sites-enabled/uniuni-$BRANCH_NAME
+          
+          # delete default configuration (if exists)
+          sudo rm -f /etc/nginx/sites-enabled/default
+          
+          # test configuration
+          if sudo nginx -t; then
+            echo "Nginx configuration is valid"
+            sudo systemctl enable nginx
+            sudo systemctl restart nginx
+            echo "✅ Nginx restarted successfully!"
+          else
+            echo "❌ Nginx configuration test failed!"
+            exit 1
+          fi
+          SCRIPT_EOF
+
+          # upload and execute script via SSH, use environment variables to pass sensitive information
+          scp -o StrictHostKeyChecking=no /tmp/deploy_script.sh $EC2_USER@$EC2_HOST:/tmp/deploy_script.sh
+          ssh -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST \
+            "DEPLOY_PATH='$DEPLOY_PATH' \
+             BRANCH_NAME='$BRANCH_NAME' \
+             GH_TOKEN='$GH_TOKEN' \
+             POSTGRES_URL='$POSTGRES_URL' \
+             bash /tmp/deploy_script.sh && rm /tmp/deploy_script.sh"
