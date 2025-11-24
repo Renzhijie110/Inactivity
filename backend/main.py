@@ -664,4 +664,4 @@ async def sync_warehouse_data():
                 "error": "Internal Server Error",
                 "details": str(error)
             }
-        
+        )
