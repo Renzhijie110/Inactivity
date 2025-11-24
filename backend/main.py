@@ -2,7 +2,7 @@ import os
 import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import asyncpg
@@ -425,6 +425,145 @@ async def hello():
     return {"message": "Hello from FastAPI!"}
 
 
+@app.get("/api/warehouse/items")
+async def get_warehouse_items(
+    warehouse: Optional[str] = Query(None, description="Filter by warehouse code"),
+    search: Optional[str] = Query(None, description="Search in tracking_number, order_id, driver_id, etc."),
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(50, ge=1, le=1000, description="Items per page"),
+    sort_by: Optional[str] = Query("nonupdated_start_timestamp", description="Field to sort by"),
+    order: str = Query("desc", regex="^(asc|desc)$", description="Sort order")
+):
+    """Get warehouse items with filtering, searching, and pagination"""
+    try:
+        pool = await get_db_pool()
+        
+        # Build WHERE clause with proper parameterized queries
+        where_conditions = []
+        params = []
+        param_num = 1
+        
+        if warehouse:
+            where_conditions.append("warehouse = $" + str(param_num))
+            params.append(warehouse)
+            param_num += 1
+        
+        if search:
+            search_pattern = f"%{search}%"
+            # Use same parameter for all ILIKE conditions
+            param_str = "$" + str(param_num)
+            where_conditions.append(
+                f"(tracking_number ILIKE {param_str} OR "
+                f"order_id ILIKE {param_str} OR "
+                f"driver_id ILIKE {param_str} OR "
+                f"sorter_id ILIKE {param_str} OR "
+                f"dsp_code ILIKE {param_str})"
+            )
+            params.append(search_pattern)
+            param_num += 1
+        
+        where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
+        
+        # Validate sort_by field to prevent SQL injection
+        allowed_sort_fields = [
+            "id", "tracking_number", "order_id", "warehouse", "zone",
+            "driver_id", "sorter_id", "team_id", "status", "current_status",
+            "last_refresh_status", "last_refresh_time", "record_status",
+            "case_closed_status", "judgment_status", "judgment_time",
+            "payment_status", "fine_amount", "nonupdated_start_timestamp",
+            "nonupdated_over_72hrs", "week_number"
+        ]
+        if sort_by not in allowed_sort_fields:
+            sort_by = "nonupdated_start_timestamp"
+        
+        # Calculate offset
+        offset = (page - 1) * page_size
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM warehouse_items {where_clause}"
+        async with pool.acquire() as conn:
+            if params:
+                total_count = await conn.fetchval(count_query, *params)
+            else:
+                total_count = await conn.fetchval(count_query)
+            
+            # Get paginated data
+            limit_param = "$" + str(param_num)
+            offset_param = "$" + str(param_num + 1)
+            data_query = f"""
+                SELECT * FROM warehouse_items 
+                {where_clause}
+                ORDER BY {sort_by} {order.upper()}
+                LIMIT {limit_param} OFFSET {offset_param}
+            """
+            query_params = params + [page_size, offset]
+            rows = await conn.fetch(data_query, *query_params)
+        
+        # Convert to WarehouseItem objects and then to dicts
+        items = [WarehouseItem(dict(row)).to_dict() for row in rows]
+        
+        # Get warehouse statistics if no warehouse filter
+        warehouse_stats = {}
+        if not warehouse:
+            async with pool.acquire() as conn:
+                stats_rows = await conn.fetch(
+                    "SELECT warehouse, COUNT(*) as count FROM warehouse_items GROUP BY warehouse"
+                )
+                warehouse_stats = {row["warehouse"]: row["count"] for row in stats_rows}
+        
+        return JSONResponse({
+            "success": True,
+            "data": items,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total_count,
+                "total_pages": (total_count + page_size - 1) // page_size
+            },
+            "filters": {
+                "warehouse": warehouse,
+                "search": search
+            },
+            "warehouse_stats": warehouse_stats
+        })
+        
+    except Exception as error:
+        print(f"Error fetching warehouse items: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Internal Server Error",
+                "details": str(error)
+            }
+        )
+
+
+@app.get("/api/warehouse/warehouses")
+async def get_warehouses():
+    """Get list of all available warehouses with item counts"""
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT warehouse, COUNT(*) as count FROM warehouse_items GROUP BY warehouse ORDER BY warehouse"
+            )
+            warehouses = [{"code": row["warehouse"], "count": row["count"]} for row in rows]
+        
+        return JSONResponse({
+            "success": True,
+            "warehouses": warehouses
+        })
+    except Exception as error:
+        print(f"Error fetching warehouses: {error}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Internal Server Error",
+                "details": str(error)
+            }
+        )
+
+
 @app.post("/api/warehouse/sync")
 async def sync_warehouse_data():
     """Sync warehouse data from API to database"""
@@ -508,5 +647,4 @@ async def sync_warehouse_data():
                 "error": "Internal Server Error",
                 "details": str(error)
             }
-        )
-
+        
