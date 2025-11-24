@@ -282,7 +282,7 @@ async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]
                 # Use executemany for batch insert
                 await conn.executemany(
                     """
-                    INSERT INTO warehouse_items (
+                    INSERT INTO recent_inactivity_data (
                         id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
                         status, current_status, last_refresh_status, last_refresh_time, record_status,
                         case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
