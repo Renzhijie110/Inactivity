@@ -1,7 +1,10 @@
 import { useState } from 'react'
 import './Login.css'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://noupdate.uniuni.site'
+// 使用相对路径，通过同一域名访问，避免CORS问题
+// 如果设置了环境变量，使用环境变量；否则使用相对路径
+// 使用自己的后端API（会代理到外部API）
+const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '')
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('')

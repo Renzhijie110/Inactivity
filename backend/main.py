@@ -119,7 +119,44 @@ async def get_current_user(authorization: str = Header(None)):
     return valid_tokens[token]
 
 
-# 登录端点
+# 外部API基础URL
+EXTERNAL_API_BASE = "https://noupdate.uniuni.site"
+
+# 代理登录端点 - 转发到外部API
+@app.post("/api/v1/auth/token")
+async def proxy_login(login_data: LoginRequest):
+    """代理登录请求到外部API"""
+    try:
+        async with httpx.AsyncClient() as client:
+            # 转发登录请求到外部API
+            response = await client.post(
+                f"{EXTERNAL_API_BASE}/api/v1/auth/token",
+                data={
+                    "username": login_data.username,
+                    "password": login_data.password
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "accept": "application/json"
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code != 200:
+                error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_data.get("detail", "登录失败")
+                )
+            
+            return response.json()
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"无法连接到外部API: {str(e)}"
+        )
+
+# 本地登录端点（保留作为备用）
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(login_data: LoginRequest):
     """用户登录 - 简单的账号密码验证"""
@@ -153,6 +190,71 @@ async def get_current_user_info(current_user: str = Depends(get_current_user)):
 async def health():
     """健康检查"""
     return {"status": "ok"}
+
+
+# 代理扫描记录API - 转发到外部API
+@app.get("/api/v1/scan-records/weekly")
+async def proxy_scan_records(
+    show_cancelled: str = Query("false"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    sort: Optional[str] = Query(None),
+    order: Optional[str] = Query(None),
+    warehouse: Optional[str] = Query(None),
+    authorization: str = Header(None)
+):
+    """代理扫描记录请求到外部API"""
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="缺少认证token"
+        )
+    
+    try:
+        # 构建查询参数
+        params = {
+            "show_cancelled": show_cancelled,
+            "page": page,
+            "page_size": page_size,
+        }
+        if sort:
+            params["sort"] = sort
+        if order:
+            params["order"] = order
+        if warehouse:
+            params["warehouse"] = warehouse
+        
+        async with httpx.AsyncClient() as client:
+            # 转发请求到外部API
+            response = await client.get(
+                f"{EXTERNAL_API_BASE}/api/v1/scan-records/weekly",
+                params=params,
+                headers={
+                    "Authorization": authorization,
+                    "accept": "application/json"
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code == 401:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="认证失败"
+                )
+            
+            if response.status_code != 200:
+                error_data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=error_data.get("detail", "请求失败")
+                )
+            
+            return response.json()
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"无法连接到外部API: {str(e)}"
+        )
 
 
 # 仓库相关API端点（需要认证）
