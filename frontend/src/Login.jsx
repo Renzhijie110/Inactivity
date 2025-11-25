@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import './Login.css'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://3.143.253.2'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://noupdate.uniuni.site'
 
 function Login({ onLogin }) {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
+  const [username, setUsername] = useState('admin')
+  const [password, setPassword] = useState('40')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -15,12 +15,18 @@ function Login({ onLogin }) {
     setLoading(true)
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+      // 使用 application/x-www-form-urlencoded 格式
+      const formData = new URLSearchParams()
+      formData.append('username', username)
+      formData.append('password', password)
+
+      const response = await fetch(`${API_BASE_URL}/api/v1/auth/token`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'accept': 'application/json',
         },
-        body: JSON.stringify({ username, password }),
+        body: formData,
       })
 
       if (!response.ok) {
@@ -29,16 +35,22 @@ function Login({ onLogin }) {
       }
 
       const data = await response.json()
-      localStorage.setItem('token', data.access_token)
-      onLogin(data.access_token)
+      const token = data.access_token
+      
+      // 先保存token
+      localStorage.setItem('token', token)
+      
+      // 立即更新状态，触发App组件重新渲染
+      onLogin(token)
+      
+      // 注意：不要在finally中设置loading，因为组件可能已经卸载
     } catch (err) {
+      setLoading(false)
       if (err.name === 'TypeError' && err.message.includes('fetch')) {
         setError('无法连接到服务器，请确保后端服务正在运行')
       } else {
         setError(err.message || '登录失败，请检查用户名和密码')
       }
-    } finally {
-      setLoading(false)
     }
   }
 
