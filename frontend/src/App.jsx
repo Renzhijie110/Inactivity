@@ -281,7 +281,7 @@ function App() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                   <div>
                     <h2>搜索结果</h2>
-                    <p>共找到 {pagination.total} 条记录 (第 {pagination.page} / {pagination.total_pages} 页)</p>
+                    <p>共找到 {pagination.total || 0} 条记录 (第 {pagination.page || 1} / {pagination.total_pages || 1} 页)</p>
                   </div>
                   {selectedWarehouse && (
                     <button 
@@ -298,7 +298,7 @@ function App() {
                         opacity: downloading ? 0.6 : 1
                       }}
                     >
-                      {downloading ? '下载中...' : `下载CSV (全部${pagination.total}条)`}
+                      {downloading ? '下载中...' : `下载CSV (全部${pagination.total || 0}条)`}
                     </button>
                   )}
                 </div>
@@ -324,14 +324,14 @@ function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {items.map((item) => (
-                          <tr key={item.id}>
-                            <td>{item.tracking_number}</td>
-                            <td>{item.order_id}</td>
-                            <td>{item.warehouse}</td>
-                            <td>{item.zone}</td>
-                            <td>{item.driver_id}</td>
-                            <td>{item.current_status}</td>
+                        {items.map((item, index) => (
+                          <tr key={item.id || item.tracking_number || `item-${index}`}>
+                            <td>{item.tracking_number || ''}</td>
+                            <td>{item.order_id || ''}</td>
+                            <td>{item.warehouse || ''}</td>
+                            <td>{item.zone || ''}</td>
+                            <td>{item.driver_id || ''}</td>
+                            <td>{item.current_status || ''}</td>
                             <td>{item.nonupdated_start_timestamp || 'N/A'}</td>
                           </tr>
                         ))}
