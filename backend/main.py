@@ -1,15 +1,36 @@
 import os
 import asyncio
 from typing import List, Dict, Any, Optional
-from datetime import datetime
-from fastapi import FastAPI, HTTPException, Query
+from datetime import datetime, timedelta
+from fastapi import FastAPI, HTTPException, Query, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from pydantic import BaseModel
 import asyncpg
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# JWT配置
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30天
+
+# 密码加密
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# HTTP Bearer认证
+security = HTTPBearer()
+
+# 默认用户（生产环境应该从数据库读取）
+DEFAULT_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+DEFAULT_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# 默认密码的哈希值（admin123）
+DEFAULT_PASSWORD_HASH = pwd_context.hash(DEFAULT_PASSWORD)
 
 app = FastAPI(
     title="FastAPI Application",
@@ -72,697 +93,205 @@ async def shutdown():
             print(f"Error closing database pool: {e}")
 
 
-class WarehouseItem:
-    def __init__(self, data: Dict[str, Any]):
-        self.id = data.get("id")
-        self.tracking_number = data.get("tracking_number")
-        self.order_id = data.get("order_id")
-        self.warehouse = data.get("warehouse")
-        self.zone = data.get("zone")
-        self.driver_id = data.get("driver_id")
-        self.sorter_id = data.get("sorter_id")
-        self.team_id = data.get("team_id")
-        self.status = data.get("status")
-        self.current_status = data.get("current_status")
-        self.last_refresh_status = data.get("last_refresh_status")
-        self.last_refresh_time = data.get("last_refresh_time")
-        self.record_status = data.get("record_status")
-        self.case_closed_status = data.get("case_closed_status")
-        self.judgment_status = data.get("judgment_status")
-        self.judgment_time = data.get("judgment_time")
-        self.payment_status = data.get("payment_status")
-        self.fine_amount = data.get("fine_amount", 0)
-        self.driver_scan_record = data.get("driver_scan_record")
-        self.driver_scan_timestamp = data.get("driver_scan_timestamp")
-        self.dsp_code = data.get("dsp_code")
-        self.oa_handler = data.get("oa_handler")
-        self.oa_operator = data.get("oa_operator")
-        self.update_time = data.get("update_time")
-        self.nonupdated_start_date = data.get("nonupdated_start_date")
-        self.nonupdated_start_timestamp = data.get("nonupdated_start_timestamp")
-        self.nonupdated_over_72hrs = data.get("nonupdated_over_72hrs")
-        self.recovery_cutoff_timestamp = data.get("recovery_cutoff_timestamp")
-        self.updated_during_grace_period = data.get("updated_during_grace_period", 0)
-        self.week_number = data.get("week_number", 0)
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for database insertion"""
-        return {
-            "id": self.id,
-            "tracking_number": self.tracking_number,
-            "order_id": self.order_id,
-            "warehouse": self.warehouse,
-            "zone": self.zone,
-            "driver_id": self.driver_id,
-            "sorter_id": self.sorter_id,
-            "team_id": self.team_id,
-            "status": self.status,
-            "current_status": self.current_status,
-            "last_refresh_status": self.last_refresh_status,
-            "last_refresh_time": self.last_refresh_time,
-            "record_status": self.record_status,
-            "case_closed_status": self.case_closed_status,
-            "judgment_status": self.judgment_status,
-            "judgment_time": self.judgment_time,
-            "payment_status": self.payment_status,
-            "fine_amount": self.fine_amount,
-            "driver_scan_record": self.driver_scan_record,
-            "driver_scan_timestamp": self.driver_scan_timestamp,
-            "dsp_code": self.dsp_code,
-            "oa_handler": self.oa_handler,
-            "oa_operator": self.oa_operator,
-            "update_time": self.update_time,
-            "nonupdated_start_date": self.nonupdated_start_date,
-            "nonupdated_start_timestamp": self.nonupdated_start_timestamp,
-            "nonupdated_over_72hrs": self.nonupdated_over_72hrs,
-            "recovery_cutoff_timestamp": self.recovery_cutoff_timestamp,
-            "updated_during_grace_period": self.updated_during_grace_period,
-            "week_number": self.week_number,
-        }
+# 认证相关模型
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
-async def get_token_from_eric() -> str:
-    """Get authentication token from Eric's API"""
-    payload = {
-        "username": "admin",
-        "password": "40"
-    }
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
 
+
+# 工具函数
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """验证密码"""
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """创建JWT token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """验证token并获取当前用户"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            print("🔐 Requesting authentication token...")
-            response = await client.post(
-                "https://noupdate.uniuni.site/api/v1/auth/token",
-                data=payload,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
-            print(f"🔐 Token response status: {response.status_code}")
-            response.raise_for_status()
-            resp = response.json()
-            if "access_token" not in resp:
-                print(f"❌ No access_token in response: {resp}")
-                raise ValueError("No access_token in response")
-            print("✅ Authentication token obtained successfully")
-            return resp["access_token"]
-    except httpx.HTTPStatusError as e:
-        print(f"❌ HTTP error getting token: {e.response.status_code} - {e.response.text}")
-        raise
-    except Exception as e:
-        print(f"❌ Error getting token: {type(e).__name__}: {e}")
-        raise
+        token = credentials.credentials
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    return username
 
 
-async def get_warehouse_data_for_single_warehouse(
-    warehouse: str, 
-    token: str,
-    max_pages: Optional[int] = None
-) -> List[WarehouseItem]:
-    """Fetch data for a single warehouse"""
-    page_size = 100
-    all_items: List[WarehouseItem] = []
-    page = 1
-    total: Optional[int] = None
-
-    print(f"📦 Fetching data for warehouse: {warehouse}")
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            while True:
-                url = (
-                    f"https://tools.uniuni.com:8887/api/v1/scan-records/weekly?"
-                    f"show_cancelled=false&page={page}&page_size={page_size}&"
-                    f"sort=nonupdated_start_timestamp&order=desc&warehouse={warehouse}"
-                )
-
-                response = await client.get(
-                    url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {token}"
-                    }
-                )
-                print(f"  📡 Page {page} - Status: {response.status_code}")
-                
-                if response.status_code != 200:
-                    print(f"  ❌ API returned status {response.status_code}: {response.text[:200]}")
-                    response.raise_for_status()
-                
-                data = response.json()
-
-                if total is None:
-                    total = data.get("total", 0)
-                    print(f"  📊 Total items available: {total}")
-
-                items = data.get("items", [])
-                print(f"  📄 Page {page} - Items received: {len(items)}")
-                
-                for item_data in items:
-                    all_items.append(WarehouseItem(item_data))
-
-                page += 1
-
-                # Get all available data, with optional page limit
-                warehouse_items = [i for i in all_items if i.warehouse == warehouse]
-                if total is not None and len(warehouse_items) >= total:
-                    print(f"  ✅ Fetched all {total} items for {warehouse}")
-                    break
-
-                if len(items) == 0:
-                    print(f"  ⚠️ No more items on page {page}, stopping")
-                    break
-                
-                # Limit pages if specified (for faster response)
-                if max_pages is not None and page >= max_pages:
-                    print(f"  ⚠️ Reached max pages limit ({max_pages}), stopping")
-                    break
-
-        print(f"✅ Completed fetching for {warehouse}: {len(all_items)} items")
-        return all_items
-    except httpx.HTTPStatusError as e:
-        print(f"❌ HTTP error fetching {warehouse}: {e.response.status_code} - {e.response.text[:200]}")
-        raise
-    except Exception as e:
-        print(f"❌ Error fetching {warehouse}: {type(e).__name__}: {e}")
-        raise
-
-
-async def get_warehouse_data_concurrent(
-    warehouses: List[str]
-) -> List[WarehouseItem]:
-    """Fetch data from multiple warehouses concurrently"""
-    try:
-        token = await get_token_from_eric()
-        print(f"🚀 Starting concurrent data fetching for {len(warehouses)} warehouses...")
-        print(f"📋 Warehouses: {', '.join(warehouses)}")
-
-        # Concurrently fetch data from all warehouses
-        warehouse_tasks = [
-            get_warehouse_data_for_single_warehouse(warehouse, token)
-            for warehouse in warehouses
-        ]
-
-        results = await asyncio.gather(*warehouse_tasks, return_exceptions=True)
-
-        # Process results
-        all_items: List[WarehouseItem] = []
-        error_count = 0
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                error_count += 1
-                print(f"❌ Error fetching data for {warehouses[i]}: {type(result).__name__}: {result}")
-                continue
-            print(f"✅ Completed fetching for {warehouses[i]}: {len(result)} items")
-            all_items.extend(result)
-
-        print(f"🎉 Total items fetched from all warehouses: {len(all_items)}")
-        if error_count > 0:
-            print(f"⚠️ {error_count} warehouse(s) failed to fetch data")
-
-        # Show statistics per warehouse
-        print("📊 Warehouse data summary:")
-        for i, result in enumerate(results):
-            if not isinstance(result, Exception):
-                print(f"  {warehouses[i]}: {len(result)} items")
-            else:
-                print(f"  {warehouses[i]}: ERROR - {type(result).__name__}")
-        
-        return all_items
-    except Exception as e:
-        print(f"❌ Fatal error in get_warehouse_data_concurrent: {type(e).__name__}: {e}")
-        raise
-
-
-def deduplicate_items(items: List[WarehouseItem]) -> List[WarehouseItem]:
-    """Remove duplicate items based on tracking_number, keeping the one with highest id"""
-    print("🔄 Starting deduplication process...")
-
-    unique_map: Dict[str, WarehouseItem] = {}
-
-    for item in items:
-        if (item.tracking_number not in unique_map or
-            unique_map[item.tracking_number].id < item.id):
-            unique_map[item.tracking_number] = item
-
-    unique_items = list(unique_map.values())
-    print(f"✅ Deduplication completed: {len(items)} -> {len(unique_items)} items")
-
-    return unique_items
-
-
-async def insert_single_batch(
-    pool: asyncpg.Pool,
-    batch: List[WarehouseItem],
-    batch_num: int,
-    total_batches: int
-) -> List[Dict[str, Any]]:
-    """Insert a single batch of items"""
-    print(f"📦 Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
-
-    inserted_items: List[Dict[str, Any]] = []
+# 登录端点
+@app.post("/api/auth/login", response_model=TokenResponse)
+async def login(login_data: LoginRequest):
+    """用户登录"""
+    # 验证用户名和密码
+    if login_data.username != DEFAULT_USERNAME:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password"
+        )
     
+    # 验证密码（支持明文和哈希密码）
+    if not verify_password(login_data.password, DEFAULT_PASSWORD_HASH):
+        # 也支持直接比较（用于向后兼容）
+        if login_data.password != DEFAULT_PASSWORD:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password"
+            )
+    
+    # 创建token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": login_data.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get("/api/auth/me")
+async def get_current_user_info(current_user: str = Depends(get_current_user)):
+    """获取当前用户信息"""
+    return {"username": current_user}
+
+
+# 健康检查端点（不需要认证）
+@app.get("/health")
+async def health():
+    """健康检查"""
+    return {"status": "ok"}
+
+
+# 仓库相关API端点（需要认证）
+@app.get("/api/warehouse/warehouses")
+async def get_warehouses(current_user: str = Depends(get_current_user)):
+    """获取仓库列表"""
     try:
-        async with pool.acquire() as conn:
-            # Prepare values for batch insert
-            values_list = []
-            for item in batch:
-                values_list.append((
-                    item.id, item.tracking_number, item.order_id, item.warehouse,
-                    item.zone, item.driver_id, item.sorter_id, item.team_id,
-                    item.status, item.current_status, item.last_refresh_status,
-                    item.last_refresh_time, item.record_status, item.case_closed_status,
-                    item.judgment_status, item.judgment_time, item.payment_status,
-                    item.fine_amount, item.driver_scan_record, item.driver_scan_timestamp,
-                    item.dsp_code, item.oa_handler, item.oa_operator, item.update_time,
-                    item.nonupdated_start_date, item.nonupdated_start_timestamp,
-                    item.nonupdated_over_72hrs, item.recovery_cutoff_timestamp,
-                    item.updated_during_grace_period, item.week_number
-                ))
-
-            # Use executemany for batch insert
-            await conn.executemany(
-                """
-                INSERT INTO recent_inactivity_data (
-                    id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
-                    status, current_status, last_refresh_status, last_refresh_time, record_status,
-                    case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
-                    driver_scan_record, driver_scan_timestamp, dsp_code, oa_handler, oa_operator,
-                    update_time, nonupdated_start_date, nonupdated_start_timestamp, nonupdated_over_72hrs,
-                    recovery_cutoff_timestamp, updated_during_grace_period, week_number
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
-                ON CONFLICT (id) DO UPDATE SET
-                    tracking_number = EXCLUDED.tracking_number,
-                    order_id = EXCLUDED.order_id,
-                    warehouse = EXCLUDED.warehouse,
-                    zone = EXCLUDED.zone,
-                    driver_id = EXCLUDED.driver_id,
-                    sorter_id = EXCLUDED.sorter_id,
-                    team_id = EXCLUDED.team_id,
-                    status = EXCLUDED.status,
-                    current_status = EXCLUDED.current_status,
-                    last_refresh_status = EXCLUDED.last_refresh_status,
-                    last_refresh_time = EXCLUDED.last_refresh_time,
-                    record_status = EXCLUDED.record_status,
-                    case_closed_status = EXCLUDED.case_closed_status,
-                    judgment_status = EXCLUDED.judgment_status,
-                    judgment_time = EXCLUDED.judgment_time,
-                    payment_status = EXCLUDED.payment_status,
-                    fine_amount = EXCLUDED.fine_amount,
-                    driver_scan_record = EXCLUDED.driver_scan_record,
-                    driver_scan_timestamp = EXCLUDED.driver_scan_timestamp,
-                    dsp_code = EXCLUDED.dsp_code,
-                    oa_handler = EXCLUDED.oa_handler,
-                    oa_operator = EXCLUDED.oa_operator,
-                    update_time = EXCLUDED.update_time,
-                    nonupdated_start_date = EXCLUDED.nonupdated_start_date,
-                    nonupdated_start_timestamp = EXCLUDED.nonupdated_start_timestamp,
-                    nonupdated_over_72hrs = EXCLUDED.nonupdated_over_72hrs,
-                    recovery_cutoff_timestamp = EXCLUDED.recovery_cutoff_timestamp,
-                    updated_during_grace_period = EXCLUDED.updated_during_grace_period,
-                    week_number = EXCLUDED.week_number
-                RETURNING id, tracking_number
-                """,
-                values_list
-            )
-
-            # Fetch inserted items
-            rows = await conn.fetch(
-                "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = ANY($1)",
-                [item.id for item in batch]
-            )
-            inserted_items = [dict(row) for row in rows]
-
-        print(f"✅ Batch {batch_num} completed: {len(batch)} items inserted")
-        return inserted_items
-
-    except Exception as error:
-        print(f"❌ Error in batch {batch_num}: {error}")
-        # Fallback to individual inserts
-        print("🔄 Falling back to individual inserts for this batch...")
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            for item in batch:
-                try:
-                    await conn.execute(
-                        """
-                        INSERT INTO recent_inactivity_data (
-                            id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
-                            status, current_status, last_refresh_status, last_refresh_time, record_status,
-                            case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
-                            driver_scan_record, driver_scan_timestamp, dsp_code, oa_handler, oa_operator,
-                            update_time, nonupdated_start_date, nonupdated_start_timestamp, nonupdated_over_72hrs,
-                            recovery_cutoff_timestamp, updated_during_grace_period, week_number
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
-                        ON CONFLICT (id) DO UPDATE SET
-                            tracking_number = EXCLUDED.tracking_number,
-                            order_id = EXCLUDED.order_id,
-                            warehouse = EXCLUDED.warehouse,
-                            zone = EXCLUDED.zone,
-                            driver_id = EXCLUDED.driver_id,
-                            sorter_id = EXCLUDED.sorter_id,
-                            team_id = EXCLUDED.team_id,
-                            status = EXCLUDED.status,
-                            current_status = EXCLUDED.current_status,
-                            last_refresh_status = EXCLUDED.last_refresh_status,
-                            last_refresh_time = EXCLUDED.last_refresh_time,
-                            record_status = EXCLUDED.record_status,
-                            case_closed_status = EXCLUDED.case_closed_status,
-                            judgment_status = EXCLUDED.judgment_status,
-                            judgment_time = EXCLUDED.judgment_time,
-                            payment_status = EXCLUDED.payment_status,
-                            fine_amount = EXCLUDED.fine_amount,
-                            driver_scan_record = EXCLUDED.driver_scan_record,
-                            driver_scan_timestamp = EXCLUDED.driver_scan_timestamp,
-                            dsp_code = EXCLUDED.dsp_code,
-                            oa_handler = EXCLUDED.oa_handler,
-                            oa_operator = EXCLUDED.oa_operator,
-                            update_time = EXCLUDED.update_time,
-                            nonupdated_start_date = EXCLUDED.nonupdated_start_date,
-                            nonupdated_start_timestamp = EXCLUDED.nonupdated_start_timestamp,
-                            nonupdated_over_72hrs = EXCLUDED.nonupdated_over_72hrs,
-                            recovery_cutoff_timestamp = EXCLUDED.recovery_cutoff_timestamp,
-                            updated_during_grace_period = EXCLUDED.updated_during_grace_period,
-                            week_number = EXCLUDED.week_number
-                        RETURNING id, tracking_number
-                        """,
-                        item.id, item.tracking_number, item.order_id, item.warehouse, item.zone,
-                        item.driver_id, item.sorter_id, item.team_id, item.status, item.current_status,
-                        item.last_refresh_status, item.last_refresh_time, item.record_status,
-                        item.case_closed_status, item.judgment_status, item.judgment_time,
-                        item.payment_status, item.fine_amount, item.driver_scan_record,
-                        item.driver_scan_timestamp, item.dsp_code, item.oa_handler, item.oa_operator,
-                        item.update_time, item.nonupdated_start_date, item.nonupdated_start_timestamp,
-                        item.nonupdated_over_72hrs, item.recovery_cutoff_timestamp,
-                        item.updated_during_grace_period, item.week_number
-                    )
-                    row = await conn.fetchrow(
-                        "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = $1",
-                        item.id
-                    )
-                    if row:
-                        inserted_items.append(dict(row))
-                except Exception as e:
-                    print(f"Error inserting item {item.tracking_number}: {e}")
-        
-        return inserted_items
-
-
-async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]:
-    """Insert items into database in batches with concurrent execution"""
-    batch_size = 1000
-    max_concurrent_batches = 5  # Limit concurrent batches to avoid overwhelming the database
-
-    print(f"🔄 Starting concurrent batch insert for {len(items)} items...")
-
-    pool = await get_db_pool()
-    
-    # Create batches
-    batches = []
-    for i in range(0, len(items), batch_size):
-        batch = items[i:i + batch_size]
-        batch_num = (i // batch_size) + 1
-        total_batches = (len(items) + batch_size - 1) // batch_size
-        batches.append((batch, batch_num, total_batches))
-
-    # Process batches concurrently with a semaphore to limit concurrency
-    semaphore = asyncio.Semaphore(max_concurrent_batches)
-    inserted_items: List[Dict[str, Any]] = []
-
-    async def process_batch_with_semaphore(batch_data):
-        async with semaphore:
-            batch, batch_num, total_batches = batch_data
-            return await insert_single_batch(pool, batch, batch_num, total_batches)
-
-    # Execute all batches concurrently
-    results = await asyncio.gather(
-        *[process_batch_with_semaphore(batch_data) for batch_data in batches],
-        return_exceptions=True
-    )
-
-    # Collect results
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            print(f"❌ Batch {batches[i][1]} failed: {type(result).__name__}: {result}")
-        else:
-            inserted_items.extend(result)
-
-    print(f"✅ Concurrent batch insert completed: {len(inserted_items)} items inserted")
-    return inserted_items
-
-
-@app.get("/")
-async def root():
-    """根路径"""
-    return {"message": "Hello World", "status": "ok"}
-
-
-@app.get("/health")
-async def health_check():
-    """健康检查端点"""
-    return {"status": "healthy"}
-
-
-@app.get("/api/hello")
-async def hello():
-    """示例 API 端点"""
-    return {"message": "Hello from FastAPI!"}
+            rows = await conn.fetch("""
+                SELECT warehouse as code, COUNT(*) as count
+                FROM items
+                WHERE warehouse IS NOT NULL AND warehouse != ''
+                GROUP BY warehouse
+                ORDER BY warehouse
+            """)
+            warehouses = [{"code": row["code"], "count": row["count"]} for row in rows]
+            return {"success": True, "warehouses": warehouses}
+    except Exception as e:
+        print(f"Error fetching warehouses: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/warehouse/items")
-async def get_warehouse_items(
-    warehouse: Optional[str] = Query(None, description="Filter by warehouse code"),
-    search: Optional[str] = Query(None, description="Search in tracking_number, order_id, driver_id, etc."),
-    page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=1000, description="Items per page"),
-    sort_by: Optional[str] = Query("nonupdated_start_timestamp", description="Field to sort by"),
-    order: str = Query("desc", regex="^(asc|desc)$", description="Sort order")
+async def get_items(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    warehouse: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    current_user: str = Depends(get_current_user)
 ):
-    """Get warehouse items with filtering, searching, and pagination"""
+    """获取物品列表"""
     try:
         pool = await get_db_pool()
-        
-        # Build WHERE clause with proper parameterized queries
-        where_conditions = []
-        params = []
-        param_num = 1
-        
-        if warehouse:
-            where_conditions.append("warehouse = $" + str(param_num))
-            params.append(warehouse)
-            param_num += 1
-        
-        if search:
-            search_pattern = f"%{search}%"
-            # Use same parameter for all ILIKE conditions
-            param_str = "$" + str(param_num)
-            where_conditions.append(
-                f"(tracking_number ILIKE {param_str} OR "
-                f"order_id ILIKE {param_str} OR "
-                f"driver_id ILIKE {param_str} OR "
-                f"sorter_id ILIKE {param_str} OR "
-                f"dsp_code ILIKE {param_str})"
-            )
-            params.append(search_pattern)
-            param_num += 1
-        
-        where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
-        
-        # Validate sort_by field to prevent SQL injection
-        allowed_sort_fields = [
-            "id", "tracking_number", "order_id", "warehouse", "zone",
-            "driver_id", "sorter_id", "team_id", "status", "current_status",
-            "last_refresh_status", "last_refresh_time", "record_status",
-            "case_closed_status", "judgment_status", "judgment_time",
-            "payment_status", "fine_amount", "nonupdated_start_timestamp",
-            "nonupdated_over_72hrs", "week_number"
-        ]
-        if sort_by not in allowed_sort_fields:
-            sort_by = "nonupdated_start_timestamp"
-        
-        # Calculate offset
-        offset = (page - 1) * page_size
-        
-        # Get total count
-        count_query = f"SELECT COUNT(*) FROM recent_inactivity_data {where_clause}"
         async with pool.acquire() as conn:
-            if params:
-                total_count = await conn.fetchval(count_query, *params)
-            else:
-                total_count = await conn.fetchval(count_query)
+            # 构建查询条件
+            conditions = []
+            params = []
+            param_count = 0
             
-            # Get paginated data
-            limit_param = "$" + str(param_num)
-            offset_param = "$" + str(param_num + 1)
+            if warehouse:
+                param_count += 1
+                conditions.append(f"warehouse = ${param_count}")
+                params.append(warehouse)
+            
+            if search:
+                param_count += 1
+                search_param = f"%{search}%"
+                conditions.append(f"(tracking_number ILIKE ${param_count} OR order_id ILIKE ${param_count} OR driver_id ILIKE ${param_count})")
+                params.append(search_param)
+            
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            
+            # 获取总数
+            count_query = f"SELECT COUNT(*) FROM items {where_clause}"
+            total = await conn.fetchval(count_query, *params)
+            
+            # 获取分页数据
+            offset = (page - 1) * page_size
+            param_count += 1
+            params.append(page_size)
+            param_count += 1
+            params.append(offset)
+            
             data_query = f"""
-                SELECT * FROM recent_inactivity_data 
+                SELECT 
+                    id, tracking_number, order_id, warehouse, zone,
+                    driver_id, current_status, nonupdated_start_timestamp
+                FROM items
                 {where_clause}
-                ORDER BY {sort_by} {order.upper()}
-                LIMIT {limit_param} OFFSET {offset_param}
+                ORDER BY id
+                LIMIT ${param_count - 1} OFFSET ${param_count}
             """
-            query_params = params + [page_size, offset]
-            rows = await conn.fetch(data_query, *query_params)
-        
-        # Convert to WarehouseItem objects and then to dicts
-        items = [WarehouseItem(dict(row)).to_dict() for row in rows]
-        
-        # Get warehouse statistics if no warehouse filter
-        warehouse_stats = {}
-        if not warehouse:
-            async with pool.acquire() as conn:
-                stats_rows = await conn.fetch(
-                    "SELECT warehouse, COUNT(*) as count FROM recent_inactivity_data GROUP BY warehouse"
-                )
+            rows = await conn.fetch(data_query, *params)
+            
+            items = []
+            for row in rows:
+                items.append({
+                    "id": row["id"],
+                    "tracking_number": row["tracking_number"],
+                    "order_id": row["order_id"],
+                    "warehouse": row["warehouse"],
+                    "zone": row["zone"],
+                    "driver_id": row["driver_id"],
+                    "current_status": row["current_status"],
+                    "nonupdated_start_timestamp": str(row["nonupdated_start_timestamp"]) if row["nonupdated_start_timestamp"] else None
+                })
+            
+            # 计算仓库统计
+            warehouse_stats = {}
+            if not warehouse and not search:
+                stats_query = """
+                    SELECT warehouse, COUNT(*) as count
+                    FROM items
+                    WHERE warehouse IS NOT NULL AND warehouse != ''
+                    GROUP BY warehouse
+                """
+                stats_rows = await conn.fetch(stats_query)
                 warehouse_stats = {row["warehouse"]: row["count"] for row in stats_rows}
-        
-        return JSONResponse({
-            "success": True,
-            "data": items,
-            "pagination": {
-                "page": page,
-                "page_size": page_size,
-                "total": total_count,
-                "total_pages": (total_count + page_size - 1) // page_size
-            },
-            "filters": {
-                "warehouse": warehouse,
-                "search": search
-            },
-            "warehouse_stats": warehouse_stats
-        })
-        
-    except Exception as error:
-        print(f"Error fetching warehouse items: {error}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Internal Server Error",
-                "details": str(error)
-            }
-        )
-
-
-@app.get("/api/warehouse/warehouses")
-async def get_warehouses():
-    """Get list of all available warehouses with item counts"""
-    try:
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT warehouse, COUNT(*) as count FROM recent_inactivity_data GROUP BY warehouse ORDER BY warehouse"
-            )
-            warehouses = [{"code": row["warehouse"], "count": row["count"]} for row in rows]
-        
-        return JSONResponse({
-            "success": True,
-            "warehouses": warehouses
-        })
-    except Exception as error:
-        print(f"Error fetching warehouses: {error}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Internal Server Error",
-                "details": str(error)
-            }
-        )
-
-
-async def fetch_existing_data_from_db() -> List[WarehouseItem]:
-    """Fetch existing data from database"""
-    print("🗄️ Fetching existing data from database...")
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM recent_inactivity_data")
-        existing_data = [WarehouseItem(dict(row)) for row in rows]
-    print(f"📊 Found {len(existing_data)} existing items in database")
-    return existing_data
-
-
-@app.post("/api/warehouse/sync")
-async def sync_warehouse_data():
-    """Sync warehouse data from API to database"""
-    try:
-        warehouses = list(set([
-            "JFK", "EWR", "PHL", "DCA", "BOS", "RDU", "CLT", "BUF", "RIC",
-            "MIA", "TPA", "MCO", "JAX", "GNV", "TLH", "ALB", "MDT", "PIT",
-            "AVP", "SYR", "PWM"
-        ]))
-
-        print("🚀 Starting warehouse data processing...")
-
-        # 1. Concurrently fetch API data and database data
-        async def fetch_api_data():
-            try:
-                data = await get_warehouse_data_concurrent(warehouses)
-                print(f"📡 Fetched {len(data)} items from API")
-                return data
-            except Exception as e:
-                print(f"❌ Failed to fetch data from API: {type(e).__name__}: {e}")
-                return []
-
-        # Run API fetch and DB fetch concurrently
-        api_data_task = asyncio.create_task(fetch_api_data())
-        db_data_task = asyncio.create_task(fetch_existing_data_from_db())
-        
-        # Wait for both to complete
-        api_data, existing_data = await asyncio.gather(api_data_task, db_data_task)
-
-        # 3. Merge API data and database data
-        all_data = api_data + existing_data
-        print(f"🔄 Total items after merge: {len(all_data)}")
-
-        # 4. Deduplicate merged data
-        unique_items = deduplicate_items(all_data)
-        print(f"✅ After deduplication: {len(unique_items)} unique items")
-
-        # Show statistics by warehouse
-        warehouse_stats: Dict[str, int] = {}
-        for item in unique_items:
-            warehouse_stats[item.warehouse] = warehouse_stats.get(item.warehouse, 0) + 1
-
-        print("📈 Unique items per warehouse:")
-        for warehouse, count in warehouse_stats.items():
-            print(f"  {warehouse}: {count} items")
-
-        if len(unique_items) > 0:
-            # 5. Clear database
-            print("🗑️ Clearing existing data from database...")
-            pool = await get_db_pool()
-            async with pool.acquire() as conn:
-                await conn.execute("DELETE FROM recent_inactivity_data")
-            print("✅ Database cleared successfully")
-
-            # 6. Batch insert deduplicated complete data
-            inserted_items = await insert_items_batch(unique_items)
-
-            print(f"✅ Successfully inserted {len(inserted_items)} unique items")
-
-            return JSONResponse({
+            
+            total_pages = (total + page_size - 1) // page_size
+            
+            return {
                 "success": True,
-                "apiItems": len(api_data),
-                "existingItems": len(existing_data),
-                "totalAfterMerge": len(all_data),
-                "uniqueItems": len(unique_items),
-                "duplicatesRemoved": len(all_data) - len(unique_items),
-                "insertedItems": len(inserted_items),
-                "message": "Data processing completed successfully"
-            })
-        else:
-            return JSONResponse({
-                "success": True,
-                "message": "No items to insert",
-                "apiItems": len(api_data),
-                "existingItems": len(existing_data),
-                "totalAfterMerge": len(all_data),
-                "uniqueItems": 0,
-                "duplicatesRemoved": len(all_data)
-            })
-
-    except Exception as error:
-        print(f"Error processing warehouse data: {error}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Internal Server Error",
-                "details": str(error)
+                "data": items,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "total_pages": total_pages
+                },
+                "warehouse_stats": warehouse_stats
             }
-        )
+    except Exception as e:
+        print(f"Error fetching items: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

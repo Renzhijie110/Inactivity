@@ -1,30 +1,55 @@
 import { useState, useEffect } from 'react'
 import './App.css'
+import Login from './Login'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 function App() {
+  const [token, setToken] = useState(localStorage.getItem('token') || null)
   const [items, setItems] = useState([])
   const [warehouses, setWarehouses] = useState([])
   const [selectedWarehouse, setSelectedWarehouse] = useState('')
-  const [searchTerm, setSearchTerm] = useState('')
   const [loading, setLoading] = useState(false)
-  const [pagination, setPagination] = useState({ page: 1, page_size: 50, total: 0, total_pages: 0 })
-  const [warehouseStats, setWarehouseStats] = useState({})
+  const [pagination, setPagination] = useState({ page: 1, page_size: 10, total: 0, total_pages: 0 })
+
+  // 如果未登录，显示登录页面
+  if (!token) {
+    return <Login onLogin={setToken} />
+  }
 
   // Fetch warehouses on mount
   useEffect(() => {
-    fetchWarehouses()
-  }, [])
+    if (token) {
+      fetchWarehouses()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token])
 
-  // Fetch items when filters change
+  // Fetch items when warehouse or page changes (only if warehouse is selected)
   useEffect(() => {
-    fetchItems()
-  }, [selectedWarehouse, searchTerm, pagination.page])
+    if (selectedWarehouse && token) {
+      fetchItems()
+    } else {
+      // Clear items when no warehouse is selected
+      setItems([])
+      setPagination({ page: 1, page_size: 10, total: 0, total_pages: 0 })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedWarehouse, pagination.page, token])
 
   const fetchWarehouses = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/warehouse/warehouses`)
+      const response = await fetch(`${API_BASE_URL}/api/warehouse/warehouses`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+      if (response.status === 401) {
+        // Token过期，清除并返回登录页面
+        localStorage.removeItem('token')
+        setToken(null)
+        return
+      }
       const data = await response.json()
       if (data.success) {
         setWarehouses(data.warehouses)
@@ -35,28 +60,50 @@ function App() {
   }
 
   const fetchItems = async () => {
+    if (!selectedWarehouse) {
+      return
+    }
+    
     setLoading(true)
     try {
       const params = new URLSearchParams({
+        show_cancelled: 'false',
         page: pagination.page.toString(),
         page_size: pagination.page_size.toString(),
+        sort: 'nonupdated_start_timestamp',
+        order: 'desc',
+        warehouse: selectedWarehouse
       })
-      
-      if (selectedWarehouse) {
-        params.append('warehouse', selectedWarehouse)
-      }
-      
-      if (searchTerm) {
-        params.append('search', searchTerm)
-      }
 
-      const response = await fetch(`${API_BASE_URL}/api/warehouse/items?${params}`)
+      const response = await fetch(`${API_BASE_URL}/api/v1/scan-records/weekly?${params}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'accept': 'application/json'
+        }
+      })
+      if (response.status === 401) {
+        // Token过期，清除并返回登录页面
+        localStorage.removeItem('token')
+        setToken(null)
+        return
+      }
       const data = await response.json()
       
-      if (data.success) {
-        setItems(data.data)
-        setPagination(data.pagination)
-        setWarehouseStats(data.warehouse_stats || {})
+      // 处理API响应，根据实际响应格式调整
+      if (data.data || data.items || Array.isArray(data)) {
+        const itemsData = data.data || data.items || data
+        setItems(Array.isArray(itemsData) ? itemsData : [])
+        
+        // 处理分页信息
+        if (data.pagination) {
+          setPagination(data.pagination)
+        } else if (data.total !== undefined) {
+          setPagination(prev => ({
+            ...prev,
+            total: data.total,
+            total_pages: Math.ceil(data.total / pagination.page_size)
+          }))
+        }
       }
     } catch (error) {
       console.error('Error fetching items:', error)
@@ -65,73 +112,52 @@ function App() {
     }
   }
 
-  const handleSearch = (e) => {
-    e.preventDefault()
+  const handleWarehouseChange = (e) => {
+    const warehouse = e.target.value
+    setSelectedWarehouse(warehouse)
     setPagination(prev => ({ ...prev, page: 1 }))
-    fetchItems()
   }
 
   const handlePageChange = (newPage) => {
     setPagination(prev => ({ ...prev, page: newPage }))
   }
 
+  const handleLogout = () => {
+    localStorage.removeItem('token')
+    setToken(null)
+  }
+
   return (
     <div className="App">
       <header className="App-header">
-        <h1>仓库数据搜索</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h1>仓库数据搜索</h1>
+          <button onClick={handleLogout} style={{ padding: '0.5em 1em', fontSize: '0.9em' }}>
+            登出
+          </button>
+        </div>
         
-        {/* Search and Filter Section */}
+        {/* Warehouse Selection Section */}
         <div className="search-section">
-          <form onSubmit={handleSearch} className="search-form">
+          <div className="search-form">
             <div className="form-group">
-              <label htmlFor="warehouse">仓库:</label>
+              <label htmlFor="warehouse">选择仓库:</label>
               <select
                 id="warehouse"
                 value={selectedWarehouse}
-                onChange={(e) => {
-                  setSelectedWarehouse(e.target.value)
-                  setPagination(prev => ({ ...prev, page: 1 }))
-                }}
+                onChange={handleWarehouseChange}
+                disabled={loading}
               >
-                <option value="">全部仓库</option>
+                <option value="">请选择仓库</option>
                 {warehouses.map(wh => (
                   <option key={wh.code} value={wh.code}>
-                    {wh.code} ({wh.count})
+                    {wh.code} {wh.count ? `(${wh.count})` : ''}
                   </option>
                 ))}
               </select>
             </div>
-
-            <div className="form-group">
-              <label htmlFor="search">搜索 (Tracking Number, Order ID, Driver ID):</label>
-              <input
-                id="search"
-                type="text"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="输入搜索关键词..."
-              />
-            </div>
-
-            <button type="submit" disabled={loading}>
-              {loading ? '搜索中...' : '搜索'}
-            </button>
-          </form>
-        </div>
-
-        {/* Warehouse Stats */}
-        {Object.keys(warehouseStats).length > 0 && (
-          <div className="warehouse-stats">
-            <h3>仓库统计:</h3>
-            <div className="stats-grid">
-              {Object.entries(warehouseStats).map(([warehouse, count]) => (
-                <div key={warehouse} className="stat-item">
-                  <strong>{warehouse}:</strong> {count} 条记录
-                </div>
-              ))}
-            </div>
           </div>
-        )}
+        </div>
 
         {/* Results Section */}
         <div className="results-section">
@@ -144,7 +170,9 @@ function App() {
                 <p>共找到 {pagination.total} 条记录 (第 {pagination.page} / {pagination.total_pages} 页)</p>
               </div>
 
-              {items.length === 0 ? (
+              {!selectedWarehouse ? (
+                <div className="no-results">请先选择一个仓库</div>
+              ) : items.length === 0 ? (
                 <div className="no-results">没有找到匹配的记录</div>
               ) : (
                 <>
