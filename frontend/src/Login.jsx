@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import './Login.css'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://3.143.253.2'
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('')
@@ -23,17 +23,20 @@ function Login({ onLogin }) {
         body: JSON.stringify({ username, password }),
       })
 
-      const data = await response.json()
-
       if (!response.ok) {
-        throw new Error(data.detail || '登录失败')
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `登录失败 (${response.status})`)
       }
 
-      // 保存token
+      const data = await response.json()
       localStorage.setItem('token', data.access_token)
       onLogin(data.access_token)
     } catch (err) {
-      setError(err.message || '登录失败，请检查用户名和密码')
+      if (err.name === 'TypeError' && err.message.includes('fetch')) {
+        setError('无法连接到服务器，请确保后端服务正在运行')
+      } else {
+        setError(err.message || '登录失败，请检查用户名和密码')
+      }
     } finally {
       setLoading(false)
     }

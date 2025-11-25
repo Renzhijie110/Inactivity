@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import './App.css'
 import Login from './Login'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://3.143.253.2:8000'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('token') || null)

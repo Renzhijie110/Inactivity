@@ -1,13 +1,10 @@
 import os
 import asyncio
+import secrets
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, Query, Depends, status
+from fastapi import FastAPI, HTTPException, Query, Depends, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 import asyncpg
 import httpx
@@ -15,22 +12,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# JWT配置
-SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30 * 24 * 60  # 30天
-
-# 密码加密
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# HTTP Bearer认证
-security = HTTPBearer()
+# 简单的token存储（内存中）
+valid_tokens: Dict[str, str] = {}  # token -> username
 
 # 默认用户（生产环境应该从数据库读取）
-DEFAULT_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-DEFAULT_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
-# 默认密码的哈希值（admin123）
-DEFAULT_PASSWORD_HASH = pwd_context.hash(DEFAULT_PASSWORD)
+DEFAULT_USERNAME = "admin"
+DEFAULT_PASSWORD = "admin123"
 
 app = FastAPI(
     title="FastAPI Application",
@@ -105,67 +92,54 @@ class TokenResponse(BaseModel):
 
 
 # 工具函数
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """验证密码"""
-    return pwd_context.verify(plain_password, hashed_password)
+def create_token(username: str) -> str:
+    """创建简单的随机token"""
+    token = secrets.token_urlsafe(32)
+    valid_tokens[token] = username
+    return token
 
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    """创建JWT token"""
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_user(authorization: str = Header(None)):
     """验证token并获取当前用户"""
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        token = credentials.credentials
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    return username
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="缺少认证token"
+        )
+    
+    # 支持 "Bearer token" 或直接 "token"
+    token = authorization.replace("Bearer ", "").strip()
+    
+    if token not in valid_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无效的token"
+        )
+    
+    return valid_tokens[token]
 
 
 # 登录端点
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(login_data: LoginRequest):
-    """用户登录"""
-    # 验证用户名和密码
+    """用户登录 - 简单的账号密码验证"""
+    # 验证用户名
     if login_data.username != DEFAULT_USERNAME:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password"
+            detail="用户名或密码错误"
         )
     
-    # 验证密码（支持明文和哈希密码）
-    if not verify_password(login_data.password, DEFAULT_PASSWORD_HASH):
-        # 也支持直接比较（用于向后兼容）
-        if login_data.password != DEFAULT_PASSWORD:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect username or password"
-            )
+    # 验证密码（直接比较，简单直接）
+    if login_data.password != DEFAULT_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户名或密码错误"
+        )
     
-    # 创建token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": login_data.username}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+    # 创建并返回简单的token
+    token = create_token(login_data.username)
+    return {"access_token": token, "token_type": "bearer"}
 
 
 @app.get("/api/auth/me")
