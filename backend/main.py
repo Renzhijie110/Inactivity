@@ -2,7 +2,7 @@ import os
 import asyncio
 import secrets
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, HTTPException, Query, Depends, status, Header
+from fastapi import FastAPI, HTTPException, Query, Depends, status, Header, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -124,16 +124,19 @@ EXTERNAL_API_BASE = "https://noupdate.uniuni.site"
 
 # 代理登录端点 - 转发到外部API
 @app.post("/api/v1/auth/token")
-async def proxy_login(login_data: LoginRequest):
-    """代理登录请求到外部API"""
+async def proxy_login(
+    username: str = Form(...),
+    password: str = Form(...)
+):
+    """代理登录请求到外部API - 支持表单格式"""
     try:
         async with httpx.AsyncClient() as client:
             # 转发登录请求到外部API
             response = await client.post(
                 f"{EXTERNAL_API_BASE}/api/v1/auth/token",
                 data={
-                    "username": login_data.username,
-                    "password": login_data.password
+                    "username": username,
+                    "password": password
                 },
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
