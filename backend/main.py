@@ -129,6 +129,11 @@ async def proxy_login(
     password: str = Form(...)
 ):
     """代理登录请求到外部API - 支持表单格式"""
+    # 如果输入的是 uni_staff/123456，转换为默认账号密码
+    if username == "uni_staff" and password == "123456":
+        username = DEFAULT_USERNAME
+        password = DEFAULT_PASSWORD
+    
     try:
         async with httpx.AsyncClient() as client:
             # 转发登录请求到外部API
