@@ -1,12 +1,14 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import './Login.css'
 
 // 使用相对路径，通过同一域名访问，避免CORS问题
 // 如果设置了环境变量，使用环境变量；否则使用相对路径
 // 使用自己的后端API（会代理到外部API）
-const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '')
+const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://3.143.253.2' : '')
 
 function Login({ onLogin }) {
+  const navigate = useNavigate()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -40,6 +42,8 @@ function Login({ onLogin }) {
       const data = await response.json()
       localStorage.setItem('token', data.access_token)
       onLogin(data.access_token)
+      // 登录成功后跳转到主页面
+      navigate('/dashboard')
     } catch (err) {
       if (err.name === 'TypeError' && err.message.includes('fetch')) {
         setError('无法连接到服务器，请确保后端服务正在运行')

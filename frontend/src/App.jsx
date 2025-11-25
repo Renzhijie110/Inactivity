@@ -1,25 +1,29 @@
 import { useState, useEffect } from 'react'
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import './App.css'
 import Login from './Login'
 
 // 使用自己的后端API（会代理到外部API）
-const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:8000' : '')
+const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://3.143.253.2' : '')
 
 // 固定的仓库列表
 const WAREHOUSES = ['JFK', 'EWR', 'PHL', 'DCA', 'BOS', 'RDU', 'CLT', 'BUF', 'RIC', 'PIT', 'MDT', 'ALB', 'SYR', 'PWM']
 
-function App() {
+// 受保护的路由组件
+function ProtectedRoute({ children }) {
+  const token = localStorage.getItem('token')
+  return token ? children : <Navigate to="/login" replace />
+}
+
+// Dashboard组件（主页面）
+function Dashboard() {
+  const navigate = useNavigate()
   const [token, setToken] = useState(localStorage.getItem('token') || null)
   const [items, setItems] = useState([])
   const [selectedWarehouse, setSelectedWarehouse] = useState('')
   const [loading, setLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [pagination, setPagination] = useState({ page: 1, page_size: 10, total: 0, total_pages: 0 })
-
-  // 如果未登录，显示登录页面
-  if (!token) {
-    return <Login onLogin={setToken} />
-  }
 
   // Fetch items when warehouse or page changes (only if warehouse is selected)
   useEffect(() => {
@@ -59,6 +63,7 @@ function App() {
         // Token过期，清除并返回登录页面
         localStorage.removeItem('token')
         setToken(null)
+        navigate('/login')
         return
       }
       const data = await response.json()
@@ -99,6 +104,7 @@ function App() {
   const handleLogout = () => {
     localStorage.removeItem('token')
     setToken(null)
+    navigate('/login')
   }
 
   // 获取所有页面的数据
@@ -132,6 +138,7 @@ function App() {
       if (firstResponse.status === 401) {
         localStorage.removeItem('token')
         setToken(null)
+        navigate('/login')
         return []
       }
 
@@ -169,6 +176,7 @@ function App() {
         if (response.status === 401) {
           localStorage.removeItem('token')
           setToken(null)
+          navigate('/login')
           break
         }
 
@@ -242,9 +250,9 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <div className="header-top">
           <h1>仓库数据搜索</h1>
-          <button onClick={handleLogout} style={{ padding: '0.5em 1em', fontSize: '0.9em' }}>
+          <button onClick={handleLogout} className="logout-button">
             登出
           </button>
         </div>
@@ -278,7 +286,7 @@ function App() {
           ) : (
             <>
               <div className="results-header">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <div className="results-header-content">
                   <div>
                     <h2>搜索结果</h2>
                     <p>共找到 {pagination.total || 0} 条记录 (第 {pagination.page || 1} / {pagination.total_pages || 1} 页)</p>
@@ -287,16 +295,7 @@ function App() {
                     <button 
                       onClick={handleDownloadCSV}
                       disabled={downloading || loading}
-                      style={{ 
-                        padding: '0.5em 1em', 
-                        fontSize: '0.9em',
-                        backgroundColor: downloading ? '#ccc' : '#4CAF50',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: downloading ? 'not-allowed' : 'pointer',
-                        opacity: downloading ? 0.6 : 1
-                      }}
+                      className="download-button"
                     >
                       {downloading ? '下载中...' : `下载CSV (全部${pagination.total || 0}条)`}
                     </button>
@@ -366,6 +365,26 @@ function App() {
         </div>
       </header>
     </div>
+  )
+}
+
+// Main App component with routing
+function App() {
+  const [token, setToken] = useState(localStorage.getItem('token') || null)
+
+  return (
+    <Routes>
+      <Route path="/login" element={<Login onLogin={setToken} />} />
+      <Route 
+        path="/dashboard" 
+        element={
+          <ProtectedRoute>
+            <Dashboard />
+          </ProtectedRoute>
+        } 
+      />
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+    </Routes>
   )
 }
 
