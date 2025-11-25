@@ -4,8 +4,8 @@ import './Login.css'
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://noupdate.uniuni.site'
 
 function Login({ onLogin }) {
-  const [username, setUsername] = useState('admin')
-  const [password, setPassword] = useState('40')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -35,22 +35,16 @@ function Login({ onLogin }) {
       }
 
       const data = await response.json()
-      const token = data.access_token
-      
-      // 先保存token
-      localStorage.setItem('token', token)
-      
-      // 立即更新状态，触发App组件重新渲染
-      onLogin(token)
-      
-      // 注意：不要在finally中设置loading，因为组件可能已经卸载
+      localStorage.setItem('token', data.access_token)
+      onLogin(data.access_token)
     } catch (err) {
-      setLoading(false)
       if (err.name === 'TypeError' && err.message.includes('fetch')) {
         setError('无法连接到服务器，请确保后端服务正在运行')
       } else {
         setError(err.message || '登录失败，请检查用户名和密码')
       }
+    } finally {
+      setLoading(false)
     }
   }
 

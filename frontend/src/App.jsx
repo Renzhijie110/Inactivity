@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react'
 import './App.css'
 import Login from './Login'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://noupdate.uniuni.site'
+// 开发环境使用代理，生产环境使用相对路径（通过nginx代理）
+// 如果设置了环境变量，使用环境变量
+const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? '' : '')
 
 // 固定的仓库列表
 const WAREHOUSES = ['JFK', 'EWR', 'PHL', 'DCA', 'BOS', 'RDU', 'CLT', 'BUF', 'RIC', 'PIT', 'MDT', 'ALB', 'SYR', 'PWM']
