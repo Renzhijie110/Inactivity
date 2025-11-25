@@ -17,7 +17,7 @@ valid_tokens: Dict[str, str] = {}  # token -> username
 
 # 默认用户（生产环境应该从数据库读取）
 DEFAULT_USERNAME = "admin"
-DEFAULT_PASSWORD = "admin123"
+DEFAULT_PASSWORD = "40"
 
 app = FastAPI(
     title="FastAPI Application",
