@@ -174,7 +174,8 @@ async def get_token_from_eric() -> str:
 
 async def get_warehouse_data_for_single_warehouse(
     warehouse: str, 
-    token: str
+    token: str,
+    max_pages: Optional[int] = None
 ) -> List[WarehouseItem]:
     """Fetch data for a single warehouse"""
     page_size = 100
@@ -185,7 +186,7 @@ async def get_warehouse_data_for_single_warehouse(
     print(f"📦 Fetching data for warehouse: {warehouse}")
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             while True:
                 url = (
                     f"https://tools.uniuni.com:8887/api/v1/scan-records/weekly?"
@@ -220,7 +221,7 @@ async def get_warehouse_data_for_single_warehouse(
 
                 page += 1
 
-                # Get all available data, no limit
+                # Get all available data, with optional page limit
                 warehouse_items = [i for i in all_items if i.warehouse == warehouse]
                 if total is not None and len(warehouse_items) >= total:
                     print(f"  ✅ Fetched all {total} items for {warehouse}")
@@ -228,6 +229,11 @@ async def get_warehouse_data_for_single_warehouse(
 
                 if len(items) == 0:
                     print(f"  ⚠️ No more items on page {page}, stopping")
+                    break
+                
+                # Limit pages if specified (for faster response)
+                if max_pages is not None and page >= max_pages:
+                    print(f"  ⚠️ Reached max pages limit ({max_pages}), stopping")
                     break
 
         print(f"✅ Completed fetching for {warehouse}: {len(all_items)} items")
@@ -303,164 +309,203 @@ def deduplicate_items(items: List[WarehouseItem]) -> List[WarehouseItem]:
     return unique_items
 
 
-async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]:
-    """Insert items into database in batches"""
-    batch_size = 1000
-    inserted_items: List[Dict[str, Any]] = []
+async def insert_single_batch(
+    pool: asyncpg.Pool,
+    batch: List[WarehouseItem],
+    batch_num: int,
+    total_batches: int
+) -> List[Dict[str, Any]]:
+    """Insert a single batch of items"""
+    print(f"📦 Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
 
-    print(f"🔄 Starting batch insert for {len(items)} items...")
+    inserted_items: List[Dict[str, Any]] = []
+    
+    try:
+        async with pool.acquire() as conn:
+            # Prepare values for batch insert
+            values_list = []
+            for item in batch:
+                values_list.append((
+                    item.id, item.tracking_number, item.order_id, item.warehouse,
+                    item.zone, item.driver_id, item.sorter_id, item.team_id,
+                    item.status, item.current_status, item.last_refresh_status,
+                    item.last_refresh_time, item.record_status, item.case_closed_status,
+                    item.judgment_status, item.judgment_time, item.payment_status,
+                    item.fine_amount, item.driver_scan_record, item.driver_scan_timestamp,
+                    item.dsp_code, item.oa_handler, item.oa_operator, item.update_time,
+                    item.nonupdated_start_date, item.nonupdated_start_timestamp,
+                    item.nonupdated_over_72hrs, item.recovery_cutoff_timestamp,
+                    item.updated_during_grace_period, item.week_number
+                ))
+
+            # Use executemany for batch insert
+            await conn.executemany(
+                """
+                INSERT INTO recent_inactivity_data (
+                    id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
+                    status, current_status, last_refresh_status, last_refresh_time, record_status,
+                    case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
+                    driver_scan_record, driver_scan_timestamp, dsp_code, oa_handler, oa_operator,
+                    update_time, nonupdated_start_date, nonupdated_start_timestamp, nonupdated_over_72hrs,
+                    recovery_cutoff_timestamp, updated_during_grace_period, week_number
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+                ON CONFLICT (id) DO UPDATE SET
+                    tracking_number = EXCLUDED.tracking_number,
+                    order_id = EXCLUDED.order_id,
+                    warehouse = EXCLUDED.warehouse,
+                    zone = EXCLUDED.zone,
+                    driver_id = EXCLUDED.driver_id,
+                    sorter_id = EXCLUDED.sorter_id,
+                    team_id = EXCLUDED.team_id,
+                    status = EXCLUDED.status,
+                    current_status = EXCLUDED.current_status,
+                    last_refresh_status = EXCLUDED.last_refresh_status,
+                    last_refresh_time = EXCLUDED.last_refresh_time,
+                    record_status = EXCLUDED.record_status,
+                    case_closed_status = EXCLUDED.case_closed_status,
+                    judgment_status = EXCLUDED.judgment_status,
+                    judgment_time = EXCLUDED.judgment_time,
+                    payment_status = EXCLUDED.payment_status,
+                    fine_amount = EXCLUDED.fine_amount,
+                    driver_scan_record = EXCLUDED.driver_scan_record,
+                    driver_scan_timestamp = EXCLUDED.driver_scan_timestamp,
+                    dsp_code = EXCLUDED.dsp_code,
+                    oa_handler = EXCLUDED.oa_handler,
+                    oa_operator = EXCLUDED.oa_operator,
+                    update_time = EXCLUDED.update_time,
+                    nonupdated_start_date = EXCLUDED.nonupdated_start_date,
+                    nonupdated_start_timestamp = EXCLUDED.nonupdated_start_timestamp,
+                    nonupdated_over_72hrs = EXCLUDED.nonupdated_over_72hrs,
+                    recovery_cutoff_timestamp = EXCLUDED.recovery_cutoff_timestamp,
+                    updated_during_grace_period = EXCLUDED.updated_during_grace_period,
+                    week_number = EXCLUDED.week_number
+                RETURNING id, tracking_number
+                """,
+                values_list
+            )
+
+            # Fetch inserted items
+            rows = await conn.fetch(
+                "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = ANY($1)",
+                [item.id for item in batch]
+            )
+            inserted_items = [dict(row) for row in rows]
+
+        print(f"✅ Batch {batch_num} completed: {len(batch)} items inserted")
+        return inserted_items
+
+    except Exception as error:
+        print(f"❌ Error in batch {batch_num}: {error}")
+        # Fallback to individual inserts
+        print("🔄 Falling back to individual inserts for this batch...")
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            for item in batch:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO recent_inactivity_data (
+                            id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
+                            status, current_status, last_refresh_status, last_refresh_time, record_status,
+                            case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
+                            driver_scan_record, driver_scan_timestamp, dsp_code, oa_handler, oa_operator,
+                            update_time, nonupdated_start_date, nonupdated_start_timestamp, nonupdated_over_72hrs,
+                            recovery_cutoff_timestamp, updated_during_grace_period, week_number
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+                        ON CONFLICT (id) DO UPDATE SET
+                            tracking_number = EXCLUDED.tracking_number,
+                            order_id = EXCLUDED.order_id,
+                            warehouse = EXCLUDED.warehouse,
+                            zone = EXCLUDED.zone,
+                            driver_id = EXCLUDED.driver_id,
+                            sorter_id = EXCLUDED.sorter_id,
+                            team_id = EXCLUDED.team_id,
+                            status = EXCLUDED.status,
+                            current_status = EXCLUDED.current_status,
+                            last_refresh_status = EXCLUDED.last_refresh_status,
+                            last_refresh_time = EXCLUDED.last_refresh_time,
+                            record_status = EXCLUDED.record_status,
+                            case_closed_status = EXCLUDED.case_closed_status,
+                            judgment_status = EXCLUDED.judgment_status,
+                            judgment_time = EXCLUDED.judgment_time,
+                            payment_status = EXCLUDED.payment_status,
+                            fine_amount = EXCLUDED.fine_amount,
+                            driver_scan_record = EXCLUDED.driver_scan_record,
+                            driver_scan_timestamp = EXCLUDED.driver_scan_timestamp,
+                            dsp_code = EXCLUDED.dsp_code,
+                            oa_handler = EXCLUDED.oa_handler,
+                            oa_operator = EXCLUDED.oa_operator,
+                            update_time = EXCLUDED.update_time,
+                            nonupdated_start_date = EXCLUDED.nonupdated_start_date,
+                            nonupdated_start_timestamp = EXCLUDED.nonupdated_start_timestamp,
+                            nonupdated_over_72hrs = EXCLUDED.nonupdated_over_72hrs,
+                            recovery_cutoff_timestamp = EXCLUDED.recovery_cutoff_timestamp,
+                            updated_during_grace_period = EXCLUDED.updated_during_grace_period,
+                            week_number = EXCLUDED.week_number
+                        RETURNING id, tracking_number
+                        """,
+                        item.id, item.tracking_number, item.order_id, item.warehouse, item.zone,
+                        item.driver_id, item.sorter_id, item.team_id, item.status, item.current_status,
+                        item.last_refresh_status, item.last_refresh_time, item.record_status,
+                        item.case_closed_status, item.judgment_status, item.judgment_time,
+                        item.payment_status, item.fine_amount, item.driver_scan_record,
+                        item.driver_scan_timestamp, item.dsp_code, item.oa_handler, item.oa_operator,
+                        item.update_time, item.nonupdated_start_date, item.nonupdated_start_timestamp,
+                        item.nonupdated_over_72hrs, item.recovery_cutoff_timestamp,
+                        item.updated_during_grace_period, item.week_number
+                    )
+                    row = await conn.fetchrow(
+                        "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = $1",
+                        item.id
+                    )
+                    if row:
+                        inserted_items.append(dict(row))
+                except Exception as e:
+                    print(f"Error inserting item {item.tracking_number}: {e}")
+        
+        return inserted_items
+
+
+async def insert_items_batch(items: List[WarehouseItem]) -> List[Dict[str, Any]]:
+    """Insert items into database in batches with concurrent execution"""
+    batch_size = 1000
+    max_concurrent_batches = 5  # Limit concurrent batches to avoid overwhelming the database
+
+    print(f"🔄 Starting concurrent batch insert for {len(items)} items...")
 
     pool = await get_db_pool()
-
+    
+    # Create batches
+    batches = []
     for i in range(0, len(items), batch_size):
         batch = items[i:i + batch_size]
         batch_num = (i // batch_size) + 1
         total_batches = (len(items) + batch_size - 1) // batch_size
-        print(f"📦 Processing batch {batch_num}/{total_batches} ({len(batch)} items)")
+        batches.append((batch, batch_num, total_batches))
 
-        try:
-            async with pool.acquire() as conn:
-                # Prepare values for batch insert
-                values_list = []
-                for item in batch:
-                    values_list.append((
-                        item.id, item.tracking_number, item.order_id, item.warehouse,
-                        item.zone, item.driver_id, item.sorter_id, item.team_id,
-                        item.status, item.current_status, item.last_refresh_status,
-                        item.last_refresh_time, item.record_status, item.case_closed_status,
-                        item.judgment_status, item.judgment_time, item.payment_status,
-                        item.fine_amount, item.driver_scan_record, item.driver_scan_timestamp,
-                        item.dsp_code, item.oa_handler, item.oa_operator, item.update_time,
-                        item.nonupdated_start_date, item.nonupdated_start_timestamp,
-                        item.nonupdated_over_72hrs, item.recovery_cutoff_timestamp,
-                        item.updated_during_grace_period, item.week_number
-                    ))
+    # Process batches concurrently with a semaphore to limit concurrency
+    semaphore = asyncio.Semaphore(max_concurrent_batches)
+    inserted_items: List[Dict[str, Any]] = []
 
-                # Use executemany for batch insert
-                await conn.executemany(
-                    """
-                    INSERT INTO recent_inactivity_data (
-                        id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
-                        status, current_status, last_refresh_status, last_refresh_time, record_status,
-                        case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
-                        driver_scan_record, driver_scan_timestamp, dsp_code, oa_handler, oa_operator,
-                        update_time, nonupdated_start_date, nonupdated_start_timestamp, nonupdated_over_72hrs,
-                        recovery_cutoff_timestamp, updated_during_grace_period, week_number
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
-                    ON CONFLICT (id) DO UPDATE SET
-                        tracking_number = EXCLUDED.tracking_number,
-                        order_id = EXCLUDED.order_id,
-                        warehouse = EXCLUDED.warehouse,
-                        zone = EXCLUDED.zone,
-                        driver_id = EXCLUDED.driver_id,
-                        sorter_id = EXCLUDED.sorter_id,
-                        team_id = EXCLUDED.team_id,
-                        status = EXCLUDED.status,
-                        current_status = EXCLUDED.current_status,
-                        last_refresh_status = EXCLUDED.last_refresh_status,
-                        last_refresh_time = EXCLUDED.last_refresh_time,
-                        record_status = EXCLUDED.record_status,
-                        case_closed_status = EXCLUDED.case_closed_status,
-                        judgment_status = EXCLUDED.judgment_status,
-                        judgment_time = EXCLUDED.judgment_time,
-                        payment_status = EXCLUDED.payment_status,
-                        fine_amount = EXCLUDED.fine_amount,
-                        driver_scan_record = EXCLUDED.driver_scan_record,
-                        driver_scan_timestamp = EXCLUDED.driver_scan_timestamp,
-                        dsp_code = EXCLUDED.dsp_code,
-                        oa_handler = EXCLUDED.oa_handler,
-                        oa_operator = EXCLUDED.oa_operator,
-                        update_time = EXCLUDED.update_time,
-                        nonupdated_start_date = EXCLUDED.nonupdated_start_date,
-                        nonupdated_start_timestamp = EXCLUDED.nonupdated_start_timestamp,
-                        nonupdated_over_72hrs = EXCLUDED.nonupdated_over_72hrs,
-                        recovery_cutoff_timestamp = EXCLUDED.recovery_cutoff_timestamp,
-                        updated_during_grace_period = EXCLUDED.updated_during_grace_period,
-                        week_number = EXCLUDED.week_number
-                    RETURNING id, tracking_number
-                    """,
-                    values_list
-                )
+    async def process_batch_with_semaphore(batch_data):
+        async with semaphore:
+            batch, batch_num, total_batches = batch_data
+            return await insert_single_batch(pool, batch, batch_num, total_batches)
 
-                # Fetch inserted items
-                rows = await conn.fetch(
-                    "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = ANY($1)",
-                    [item.id for item in batch]
-                )
-                inserted_items.extend([dict(row) for row in rows])
+    # Execute all batches concurrently
+    results = await asyncio.gather(
+        *[process_batch_with_semaphore(batch_data) for batch_data in batches],
+        return_exceptions=True
+    )
 
-            print(f"✅ Batch {batch_num} completed: {len(batch)} items inserted")
+    # Collect results
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"❌ Batch {batches[i][1]} failed: {type(result).__name__}: {result}")
+        else:
+            inserted_items.extend(result)
 
-        except Exception as error:
-            print(f"❌ Error in batch {batch_num}: {error}")
-            # Fallback to individual inserts
-            print("🔄 Falling back to individual inserts for this batch...")
-            pool = await get_db_pool()
-            async with pool.acquire() as conn:
-                for item in batch:
-                    try:
-                        await conn.execute(
-                            """
-                            INSERT INTO recent_inactivity_data (
-                                id, tracking_number, order_id, warehouse, zone, driver_id, sorter_id, team_id,
-                                status, current_status, last_refresh_status, last_refresh_time, record_status,
-                                case_closed_status, judgment_status, judgment_time, payment_status, fine_amount,
-                                driver_scan_record, driver_scan_timestamp, dsp_code, oa_handler, oa_operator,
-                                update_time, nonupdated_start_date, nonupdated_start_timestamp, nonupdated_over_72hrs,
-                                recovery_cutoff_timestamp, updated_during_grace_period, week_number
-                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
-                            ON CONFLICT (id) DO UPDATE SET
-                                tracking_number = EXCLUDED.tracking_number,
-                                order_id = EXCLUDED.order_id,
-                                warehouse = EXCLUDED.warehouse,
-                                zone = EXCLUDED.zone,
-                                driver_id = EXCLUDED.driver_id,
-                                sorter_id = EXCLUDED.sorter_id,
-                                team_id = EXCLUDED.team_id,
-                                status = EXCLUDED.status,
-                                current_status = EXCLUDED.current_status,
-                                last_refresh_status = EXCLUDED.last_refresh_status,
-                                last_refresh_time = EXCLUDED.last_refresh_time,
-                                record_status = EXCLUDED.record_status,
-                                case_closed_status = EXCLUDED.case_closed_status,
-                                judgment_status = EXCLUDED.judgment_status,
-                                judgment_time = EXCLUDED.judgment_time,
-                                payment_status = EXCLUDED.payment_status,
-                                fine_amount = EXCLUDED.fine_amount,
-                                driver_scan_record = EXCLUDED.driver_scan_record,
-                                driver_scan_timestamp = EXCLUDED.driver_scan_timestamp,
-                                dsp_code = EXCLUDED.dsp_code,
-                                oa_handler = EXCLUDED.oa_handler,
-                                oa_operator = EXCLUDED.oa_operator,
-                                update_time = EXCLUDED.update_time,
-                                nonupdated_start_date = EXCLUDED.nonupdated_start_date,
-                                nonupdated_start_timestamp = EXCLUDED.nonupdated_start_timestamp,
-                                nonupdated_over_72hrs = EXCLUDED.nonupdated_over_72hrs,
-                                recovery_cutoff_timestamp = EXCLUDED.recovery_cutoff_timestamp,
-                                updated_during_grace_period = EXCLUDED.updated_during_grace_period,
-                                week_number = EXCLUDED.week_number
-                            RETURNING id, tracking_number
-                            """,
-                            item.id, item.tracking_number, item.order_id, item.warehouse, item.zone,
-                            item.driver_id, item.sorter_id, item.team_id, item.status, item.current_status,
-                            item.last_refresh_status, item.last_refresh_time, item.record_status,
-                            item.case_closed_status, item.judgment_status, item.judgment_time,
-                            item.payment_status, item.fine_amount, item.driver_scan_record,
-                            item.driver_scan_timestamp, item.dsp_code, item.oa_handler, item.oa_operator,
-                            item.update_time, item.nonupdated_start_date, item.nonupdated_start_timestamp,
-                            item.nonupdated_over_72hrs, item.recovery_cutoff_timestamp,
-                            item.updated_during_grace_period, item.week_number
-                        )
-                        row = await conn.fetchrow(
-                            "SELECT id, tracking_number FROM recent_inactivity_data WHERE id = $1",
-                            item.id
-                        )
-                        if row:
-                            inserted_items.append(dict(row))
-                    except Exception as e:
-                        print(f"Error inserting item {item.tracking_number}: {e}")
-
-    print(f"✅ Batch insert completed: {len(inserted_items)} items inserted")
+    print(f"✅ Concurrent batch insert completed: {len(inserted_items)} items inserted")
     return inserted_items
 
 
@@ -621,6 +666,17 @@ async def get_warehouses():
         )
 
 
+async def fetch_existing_data_from_db() -> List[WarehouseItem]:
+    """Fetch existing data from database"""
+    print("🗄️ Fetching existing data from database...")
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM recent_inactivity_data")
+        existing_data = [WarehouseItem(dict(row)) for row in rows]
+    print(f"📊 Found {len(existing_data)} existing items in database")
+    return existing_data
+
+
 @app.post("/api/warehouse/sync")
 async def sync_warehouse_data():
     """Sync warehouse data from API to database"""
@@ -633,22 +689,22 @@ async def sync_warehouse_data():
 
         print("🚀 Starting warehouse data processing...")
 
-        # 1. Fetch new data from API
-        try:
-            api_data = await get_warehouse_data_concurrent(warehouses)
-            print(f"📡 Fetched {len(api_data)} items from API")
-        except Exception as e:
-            print(f"❌ Failed to fetch data from API: {type(e).__name__}: {e}")
-            api_data = []
-            # Continue with empty API data, use existing database data
+        # 1. Concurrently fetch API data and database data
+        async def fetch_api_data():
+            try:
+                data = await get_warehouse_data_concurrent(warehouses)
+                print(f"📡 Fetched {len(data)} items from API")
+                return data
+            except Exception as e:
+                print(f"❌ Failed to fetch data from API: {type(e).__name__}: {e}")
+                return []
 
-        # 2. Fetch existing data from database
-        print("🗄️ Fetching existing data from database...")
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM recent_inactivity_data")
-            existing_data = [WarehouseItem(dict(row)) for row in rows]
-        print(f"📊 Found {len(existing_data)} existing items in database")
+        # Run API fetch and DB fetch concurrently
+        api_data_task = asyncio.create_task(fetch_api_data())
+        db_data_task = asyncio.create_task(fetch_existing_data_from_db())
+        
+        # Wait for both to complete
+        api_data, existing_data = await asyncio.gather(api_data_task, db_data_task)
 
         # 3. Merge API data and database data
         all_data = api_data + existing_data
