@@ -148,15 +148,28 @@ async def get_token_from_eric() -> str:
         "password": "40"
     }
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://noupdate.uniuni.site/api/v1/auth/token",
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"}
-        )
-        response.raise_for_status()
-        resp = response.json()
-        return resp["access_token"]
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            print("🔐 Requesting authentication token...")
+            response = await client.post(
+                "https://noupdate.uniuni.site/api/v1/auth/token",
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            print(f"🔐 Token response status: {response.status_code}")
+            response.raise_for_status()
+            resp = response.json()
+            if "access_token" not in resp:
+                print(f"❌ No access_token in response: {resp}")
+                raise ValueError("No access_token in response")
+            print("✅ Authentication token obtained successfully")
+            return resp["access_token"]
+    except httpx.HTTPStatusError as e:
+        print(f"❌ HTTP error getting token: {e.response.status_code} - {e.response.text}")
+        raise
+    except Exception as e:
+        print(f"❌ Error getting token: {type(e).__name__}: {e}")
+        raise
 
 
 async def get_warehouse_data_for_single_warehouse(
@@ -169,81 +182,108 @@ async def get_warehouse_data_for_single_warehouse(
     page = 1
     total: Optional[int] = None
 
-    print(f"Fetching data for warehouse: {warehouse}")
+    print(f"📦 Fetching data for warehouse: {warehouse}")
 
-    async with httpx.AsyncClient() as client:
-        while True:
-            url = (
-                f"https://tools.uniuni.com:8887/api/v1/scan-records/weekly?"
-                f"show_cancelled=false&page={page}&page_size={page_size}&"
-                f"sort=nonupdated_start_timestamp&order=desc&warehouse={warehouse}"
-            )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            while True:
+                url = (
+                    f"https://tools.uniuni.com:8887/api/v1/scan-records/weekly?"
+                    f"show_cancelled=false&page={page}&page_size={page_size}&"
+                    f"sort=nonupdated_start_timestamp&order=desc&warehouse={warehouse}"
+                )
 
-            response = await client.get(
-                url,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {token}"
-                }
-            )
-            response.raise_for_status()
-            data = response.json()
+                response = await client.get(
+                    url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {token}"
+                    }
+                )
+                print(f"  📡 Page {page} - Status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    print(f"  ❌ API returned status {response.status_code}: {response.text[:200]}")
+                    response.raise_for_status()
+                
+                data = response.json()
 
-            if total is None:
-                total = data.get("total", 0)
+                if total is None:
+                    total = data.get("total", 0)
+                    print(f"  📊 Total items available: {total}")
 
-            items = data.get("items", [])
-            print(f"  Page {page} - Items: {len(items)}")
-            
-            for item_data in items:
-                all_items.append(WarehouseItem(item_data))
+                items = data.get("items", [])
+                print(f"  📄 Page {page} - Items received: {len(items)}")
+                
+                for item_data in items:
+                    all_items.append(WarehouseItem(item_data))
 
-            page += 1
+                page += 1
 
-            # Get all available data, no limit
-            warehouse_items = [i for i in all_items if i.warehouse == warehouse]
-            if total is not None and len(warehouse_items) >= total:
-                break
+                # Get all available data, no limit
+                warehouse_items = [i for i in all_items if i.warehouse == warehouse]
+                if total is not None and len(warehouse_items) >= total:
+                    print(f"  ✅ Fetched all {total} items for {warehouse}")
+                    break
 
-            if len(items) == 0:
-                break
+                if len(items) == 0:
+                    print(f"  ⚠️ No more items on page {page}, stopping")
+                    break
 
-    return all_items
+        print(f"✅ Completed fetching for {warehouse}: {len(all_items)} items")
+        return all_items
+    except httpx.HTTPStatusError as e:
+        print(f"❌ HTTP error fetching {warehouse}: {e.response.status_code} - {e.response.text[:200]}")
+        raise
+    except Exception as e:
+        print(f"❌ Error fetching {warehouse}: {type(e).__name__}: {e}")
+        raise
 
 
 async def get_warehouse_data_concurrent(
     warehouses: List[str]
 ) -> List[WarehouseItem]:
     """Fetch data from multiple warehouses concurrently"""
-    token = await get_token_from_eric()
-    print(f"🚀 Starting concurrent data fetching for {len(warehouses)} warehouses...")
+    try:
+        token = await get_token_from_eric()
+        print(f"🚀 Starting concurrent data fetching for {len(warehouses)} warehouses...")
+        print(f"📋 Warehouses: {', '.join(warehouses)}")
 
-    # Concurrently fetch data from all warehouses
-    warehouse_tasks = [
-        get_warehouse_data_for_single_warehouse(warehouse, token)
-        for warehouse in warehouses
-    ]
+        # Concurrently fetch data from all warehouses
+        warehouse_tasks = [
+            get_warehouse_data_for_single_warehouse(warehouse, token)
+            for warehouse in warehouses
+        ]
 
-    results = await asyncio.gather(*warehouse_tasks, return_exceptions=True)
+        results = await asyncio.gather(*warehouse_tasks, return_exceptions=True)
 
-    # Process results
-    all_items: List[WarehouseItem] = []
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            print(f"❌ Error fetching data for {warehouses[i]}: {result}")
-            continue
-        print(f"✅ Completed fetching for {warehouses[i]}: {len(result)} items")
-        all_items.extend(result)
+        # Process results
+        all_items: List[WarehouseItem] = []
+        error_count = 0
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                error_count += 1
+                print(f"❌ Error fetching data for {warehouses[i]}: {type(result).__name__}: {result}")
+                continue
+            print(f"✅ Completed fetching for {warehouses[i]}: {len(result)} items")
+            all_items.extend(result)
 
-    print(f"🎉 Total items fetched from all warehouses: {len(all_items)}")
+        print(f"🎉 Total items fetched from all warehouses: {len(all_items)}")
+        if error_count > 0:
+            print(f"⚠️ {error_count} warehouse(s) failed to fetch data")
 
-    # Show statistics per warehouse
-    print("📊 Warehouse data summary:")
-    for i, result in enumerate(results):
-        if not isinstance(result, Exception):
-            print(f"  {warehouses[i]}: {len(result)} items")
-
-    return all_items
+        # Show statistics per warehouse
+        print("📊 Warehouse data summary:")
+        for i, result in enumerate(results):
+            if not isinstance(result, Exception):
+                print(f"  {warehouses[i]}: {len(result)} items")
+            else:
+                print(f"  {warehouses[i]}: ERROR - {type(result).__name__}")
+        
+        return all_items
+    except Exception as e:
+        print(f"❌ Fatal error in get_warehouse_data_concurrent: {type(e).__name__}: {e}")
+        raise
 
 
 def deduplicate_items(items: List[WarehouseItem]) -> List[WarehouseItem]:
@@ -594,8 +634,13 @@ async def sync_warehouse_data():
         print("🚀 Starting warehouse data processing...")
 
         # 1. Fetch new data from API
-        api_data = await get_warehouse_data_concurrent(warehouses)
-        print(f"📡 Fetched {len(api_data)} items from API")
+        try:
+            api_data = await get_warehouse_data_concurrent(warehouses)
+            print(f"📡 Fetched {len(api_data)} items from API")
+        except Exception as e:
+            print(f"❌ Failed to fetch data from API: {type(e).__name__}: {e}")
+            api_data = []
+            # Continue with empty API data, use existing database data
 
         # 2. Fetch existing data from database
         print("🗄️ Fetching existing data from database...")
