@@ -35,7 +35,10 @@ async def startup():
         print("✅ Application startup completed")
     except Exception as e:
         print(f"❌ Application startup failed: {e}")
+        import traceback
+        traceback.print_exc()
         # Don't raise here, let the service start and handle errors in endpoints
+        # This allows the service to start even if DB is temporarily unavailable
         pass
 
 
@@ -47,5 +50,24 @@ async def shutdown():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """Health check endpoint for load balancer and monitoring."""
+    health_status = {
+        "status": "ok",
+        "service": "FastAPI Backend",
+        "database": "unknown"
+    }
+    
+    # Check database connection
+    try:
+        pool = await db.get_pool()
+        if pool:
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            health_status["database"] = "connected"
+        else:
+            health_status["database"] = "not_connected"
+    except Exception as e:
+        health_status["database"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    return health_status

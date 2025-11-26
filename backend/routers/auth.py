@@ -20,24 +20,45 @@ async def proxy_login(
         username = settings.default_username
         password = settings.default_password
     
-    # Get external API token
-    external_response = await external_api_client.login(username, password)
-    external_token = external_response.get("access_token")
-    
-    if external_token:
-        # Create local token and store external API token with credentials for refresh
-        local_token = create_token(
-            username, 
-            external_token,
-            credentials=(username, password)  # Store credentials for token refresh
+    try:
+        # Get external API token
+        external_response = await external_api_client.login(username, password)
+        external_token = external_response.get("access_token")
+        
+        if external_token:
+            # Create local token and store external API token with credentials for refresh
+            local_token = create_token(
+                username, 
+                external_token,
+                credentials=(username, password)  # Store credentials for token refresh
+            )
+            return {
+                "access_token": local_token,
+                "token_type": "bearer",
+                "external_token": external_token  # Also return external token for backward compatibility
+            }
+        
+        return external_response
+    except HTTPException as e:
+        # Re-raise HTTPException with proper status code
+        raise e
+    except Exception as e:
+        # Handle any other exceptions (network errors, etc.)
+        error_msg = str(e)
+        print(f"Error during login: {error_msg}")
+        
+        # If it's a connection error or timeout, return 503
+        if "无法连接到外部API" in error_msg or "timeout" in error_msg.lower():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"外部API服务不可用: {error_msg}"
+            )
+        
+        # For other errors, return 500 with error message
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"登录失败: {error_msg}"
         )
-        return {
-            "access_token": local_token,
-            "token_type": "bearer",
-            "external_token": external_token  # Also return external token for backward compatibility
-        }
-    
-    return external_response
 
 
 @router.post("/auth/login", response_model=TokenResponse)

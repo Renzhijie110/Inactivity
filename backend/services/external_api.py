@@ -44,15 +44,33 @@ class ExternalAPIClient:
                 # Handle other errors
                 if response.status_code != 200:
                     error_data = {}
+                    error_detail = f"外部API返回错误 (状态码: {response.status_code})"
+                    
                     if response.headers.get("content-type", "").startswith("application/json"):
                         try:
                             error_data = response.json()
+                            error_detail = error_data.get("detail") or error_data.get("message") or error_detail
+                        except Exception:
+                            pass
+                    else:
+                        # Try to get text response
+                        try:
+                            text_response = response.text
+                            if text_response:
+                                error_detail = f"{error_detail}: {text_response[:200]}"
                         except Exception:
                             pass
                     
+                    # For 5xx errors, return 503 to indicate service unavailable
+                    if 500 <= response.status_code < 600:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"外部API服务错误: {error_detail}"
+                        )
+                    
                     raise HTTPException(
                         status_code=response.status_code,
-                        detail=error_data.get("detail", "请求失败")
+                        detail=error_detail
                     )
                 
                 return response.json()
