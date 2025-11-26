@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, status, Header
 from typing import Optional, List
 from ..database import db
-from ..auth import get_current_user
+from ..auth import get_current_user, get_external_api_authorization
 from ..models import ItemsResponse
 from ..services.external_api import external_api_client
 
@@ -14,18 +14,20 @@ WAREHOUSES = ['JFK', 'EWR', 'PHL', 'DCA', 'BOS', 'RDU', 'CLT', 'BUF', 'RIC', 'PI
 @router.get("/")
 async def get_consjob(
     current_user: str = Depends(get_current_user),
-    authorization: str = Header(None),
     sync: bool = Query(False, description="是否从外部API同步数据到数据库"),
-    warehouse: Optional[str] = Query(None, description="指定要同步的仓库，不指定则同步所有仓库")
+    warehouse: Optional[str] = Query(None, description="指定要同步的仓库，不指定则同步所有仓库"),
+    authorization: str = Header(None)
 ):
     """Get consjob list. If sync=true, fetch warehouse data from external API and save to database."""
     if sync:
-        if not authorization:
+        # 获取外部API token（仅在sync时需要）
+        try:
+            external_auth = await get_external_api_authorization(authorization)
+        except HTTPException as e:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="需要认证token来同步数据"
+                detail="需要外部API token来同步数据，请重新登录"
             )
-        
         # 确定要处理的仓库列表
         warehouses_to_sync = [warehouse] if warehouse and warehouse in WAREHOUSES else WAREHOUSES
         
@@ -45,9 +47,9 @@ async def get_consjob(
             
             for wh in warehouses_to_sync:
                 try:
-                    # 获取单个仓库的数据
+                    # 获取单个仓库的数据（使用自动获取的外部API token）
                     warehouse_result = await external_api_client.get_warehouse_data(
-                        authorization=authorization,
+                        authorization=external_auth,
                         warehouse=wh,
                         show_cancelled="false",
                         page_size=100
@@ -121,22 +123,25 @@ async def sync_warehouse(
     authorization: str = Header(None)
 ):
     """Sync data for a specific warehouse from external API to database."""
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="需要认证token来同步数据"
-        )
-    
     if warehouse not in WAREHOUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"无效的仓库代码: {warehouse}. 有效的仓库: {', '.join(WAREHOUSES)}"
         )
     
+    # 获取外部API token
     try:
-        # 获取单个仓库的数据
+        external_auth = await get_external_api_authorization(authorization)
+    except HTTPException as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="需要外部API token来同步数据，请重新登录"
+        )
+    
+    try:
+        # 获取单个仓库的数据（使用自动获取的外部API token）
         warehouse_result = await external_api_client.get_warehouse_data(
-            authorization=authorization,
+            authorization=external_auth,
             warehouse=warehouse,
             show_cancelled="false",
             page_size=100
