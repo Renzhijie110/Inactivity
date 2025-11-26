@@ -3,7 +3,7 @@ import secrets
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 from fastapi import HTTPException, Header, status
-from .config import settings
+from config import settings
 
 
 # Simple token storage (in-memory)
@@ -90,7 +90,7 @@ async def refresh_external_api_token(local_token: str) -> Optional[str]:
     username, password = token_credentials[local_token]
     
     try:
-        from .services.external_api import external_api_client
+        from services.external_api import external_api_client
         external_response = await external_api_client.login(username, password)
         external_token = external_response.get("access_token")
         

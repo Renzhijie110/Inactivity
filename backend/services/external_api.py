@@ -2,7 +2,7 @@
 import httpx
 from typing import Optional, Dict, Any, List
 from fastapi import HTTPException, status
-from ..config import settings
+from config import settings
 
 
 class ExternalAPIClient:
