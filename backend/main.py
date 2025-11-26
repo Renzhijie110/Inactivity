@@ -134,16 +134,17 @@ async def get_external_api_token() -> Optional[str]:
         return None
 
 
-async def fetch_and_save_scan_records():
-    """定时任务：获取扫描记录并写入数据库"""
-    print(f"[{datetime.now()}] 开始执行定时任务：获取扫描记录...")
+async def fetch_and_save_scan_records_for_warehouse(warehouse: Optional[str] = None):
+    """获取指定warehouse的扫描记录并写入数据库"""
+    warehouse_label = warehouse if warehouse else "所有仓库"
+    print(f"[{datetime.now()}] 开始获取扫描记录 - Warehouse: {warehouse_label}")
     
     try:
         # 获取认证token
         token = await get_external_api_token()
         if not token:
-            print("❌ 无法获取认证token，跳过本次任务")
-            return
+            print(f"❌ 无法获取认证token，跳过 {warehouse_label} 的数据获取")
+            return 0
         
         pool = await get_db_pool()
         async with httpx.AsyncClient() as client:
@@ -152,7 +153,7 @@ async def fetch_and_save_scan_records():
             total_saved = 0
             
             while True:
-                # 获取扫描记录（不指定warehouse，获取所有仓库的数据）
+                # 构建查询参数（类似API端点）
                 params = {
                     "show_cancelled": "false",
                     "page": page,
@@ -160,6 +161,9 @@ async def fetch_and_save_scan_records():
                     "sort": "nonupdated_start_timestamp",
                     "order": "desc"
                 }
+                # 如果指定了warehouse，添加到参数中
+                if warehouse:
+                    params["warehouse"] = warehouse
                 
                 response = await client.get(
                     f"{EXTERNAL_API_BASE}/api/v1/scan-records/weekly",
@@ -240,10 +244,38 @@ async def fetch_and_save_scan_records():
                 
                 page += 1
             
-            print(f"✅ 定时任务完成，共保存 {total_saved} 条记录")
+            print(f"✅ {warehouse_label} 数据获取完成，共保存 {total_saved} 条记录")
+            return total_saved
     
     except Exception as e:
-        print(f"❌ 定时任务执行失败: {e}")
+        print(f"❌ {warehouse_label} 数据获取失败: {e}")
+        return 0
+
+
+async def fetch_and_save_scan_records():
+    """定时任务：获取所有配置的warehouse的扫描记录并写入数据库"""
+    print(f"[{datetime.now()}] ========== 开始执行定时任务：获取扫描记录 ==========")
+    
+    # 从环境变量获取warehouse列表，如果没有则使用默认列表
+    warehouses_str = os.getenv("SYNC_WAREHOUSES", "")
+    if warehouses_str:
+        warehouses = [w.strip() for w in warehouses_str.split(",") if w.strip()]
+    else:
+        # 默认仓库列表（与前端保持一致）
+        warehouses = ['JFK', 'EWR', 'PHL', 'DCA', 'BOS', 'RDU', 'CLT', 'BUF', 'RIC', 'PIT', 'MDT', 'ALB', 'SYR', 'PWM', 'MIA', 'TPA', 'JAX', 'MCO', 'GNV', 'TLH']
+    
+    if not warehouses:
+        print("⚠️ 未配置需要同步的warehouse，跳过本次任务")
+        return
+    
+    total_all_saved = 0
+    for warehouse in warehouses:
+        saved_count = await fetch_and_save_scan_records_for_warehouse(warehouse)
+        total_all_saved += saved_count
+        # 每个warehouse之间稍作延迟，避免请求过快
+        await asyncio.sleep(1)
+    
+    print(f"[{datetime.now()}] ========== 定时任务完成，共处理 {len(warehouses)} 个warehouse，总计保存 {total_all_saved} 条记录 ==========")
 
 
 @app.on_event("startup")
@@ -420,6 +452,24 @@ async def get_current_user_info(current_user: str = Depends(get_current_user)):
 async def health():
     """健康检查"""
     return {"status": "ok"}
+
+
+# 手动触发定时任务端点（用于测试）
+@app.post("/api/cron/trigger-scan-records")
+async def trigger_scan_records():
+    """手动触发扫描记录定时任务（用于测试）"""
+    try:
+        # 在后台执行定时任务
+        asyncio.create_task(fetch_and_save_scan_records())
+        return {
+            "status": "success",
+            "message": "定时任务已触发，正在后台执行"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"触发定时任务失败: {str(e)}"
+        )
 
 
 # 代理扫描记录API - 转发到外部API
