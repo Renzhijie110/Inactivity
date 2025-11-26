@@ -100,6 +100,39 @@ async def init_database_tables():
                 ON scan_records(created_at)
             """)
             
+            # 创建weekly_inactivity表
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS weekly_inactivity (
+                    id SERIAL PRIMARY KEY,
+                    warehouse VARCHAR(50) NOT NULL,
+                    tno VARCHAR(100) NOT NULL,
+                    nonupdated_start_date TIMESTAMP,
+                    status INT,
+                    route INT,
+                    driver_id INT,
+                    team_name VARCHAR(100),
+                    if_driver_lost BOOLEAN,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            
+            # 创建索引
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_weekly_inactivity_warehouse 
+                ON weekly_inactivity(warehouse)
+            """)
+            
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_weekly_inactivity_tno 
+                ON weekly_inactivity(tno)
+            """)
+            
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_weekly_inactivity_nonupdated_start_date 
+                ON weekly_inactivity(nonupdated_start_date)
+            """)
+            
             print("✅ Database tables initialized successfully")
     except Exception as e:
         print(f"❌ Failed to initialize database tables: {e}")
@@ -273,9 +306,156 @@ async def fetch_and_save_scan_records():
         saved_count = await fetch_and_save_scan_records_for_warehouse(warehouse)
         total_all_saved += saved_count
         # 每个warehouse之间稍作延迟，避免请求过快
-        await asyncio.sleep(1)
+        await asyncio.sleep(60)
     
     print(f"[{datetime.now()}] ========== 定时任务完成，共处理 {len(warehouses)} 个warehouse，总计保存 {total_all_saved} 条记录 ==========")
+
+
+async def cleanup_old_scan_records():
+    """定时任务：删除超过15天的扫描记录"""
+    print(f"[{datetime.now()}] ========== 开始执行清理任务：删除超过15天的扫描记录 ==========")
+    
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            # 先统计要删除的记录数
+            count_before = await conn.fetchval("""
+                SELECT COUNT(*) FROM scan_records
+                WHERE nonupdated_start_timestamp < CURRENT_DATE - INTERVAL '15 days'
+            """)
+            
+            if count_before == 0:
+                print("✅ 没有需要清理的记录")
+                return 0
+            
+            # 执行删除操作
+            result = await conn.execute("""
+                DELETE FROM scan_records
+                WHERE nonupdated_start_timestamp < CURRENT_DATE - INTERVAL '15 days'
+            """)
+            
+            # asyncpg的execute返回格式类似 "DELETE 123"，提取数字
+            deleted_count = 0
+            if result:
+                try:
+                    # 从返回字符串中提取数字（格式：'DELETE 123'）
+                    if isinstance(result, str):
+                        parts = result.split()
+                        if len(parts) >= 2:
+                            deleted_count = int(parts[1])
+                    else:
+                        deleted_count = int(result) if str(result).isdigit() else 0
+                except (ValueError, AttributeError):
+                    # 如果解析失败，使用之前统计的数量
+                    deleted_count = count_before or 0
+            
+            print(f"✅ 清理任务完成，删除了 {deleted_count} 条超过15天的记录")
+            return deleted_count
+    
+    except Exception as e:
+        print(f"❌ 清理任务执行失败: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return 0
+
+
+async def generate_weekly_inactivity_report():
+    """定时任务：每周日生成周报数据，从scan_records写入weekly_inactivity表"""
+    print(f"[{datetime.now()}] ========== 开始执行周报生成任务 ==========")
+    
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            records = await conn.fetch("""
+                SELECT DISTINCT 
+                    tracking_number,
+                    order_id,
+                    warehouse,
+                    driver_id,
+                    current_status,
+                    nonupdated_start_timestamp
+                FROM scan_records
+                WHERE nonupdated_start_timestamp > CURRENT_DATE - INTERVAL '14 days'
+                AND nonupdated_start_timestamp < CURRENT_DATE - INTERVAL '6 days'
+                AND current_status != '203'
+                AND current_status != '213'
+            """)
+            
+            if not records:
+                print("✅ 没有符合条件的记录需要写入")
+                # 即使没有记录，也清空表
+                await conn.execute("TRUNCATE TABLE weekly_inactivity")
+                print("✅ 已清空 weekly_inactivity 表")
+                return 0
+            
+            print(f"📊 找到 {len(records)} 条符合条件的记录")
+            
+            # 在插入之前先清空表
+            await conn.execute("TRUNCATE TABLE weekly_inactivity")
+            print("✅ 已清空 weekly_inactivity 表，准备插入新数据")
+            
+            # 批量插入数据
+            inserted_count = 0
+            for record in records:
+                try:
+                    # 转换字段类型
+                    tracking_number = record['tracking_number']
+                    warehouse = record['warehouse']
+                    nonupdated_start_date = record['nonupdated_start_timestamp']
+                    
+                    # 转换status为int（如果转换失败则为NULL）
+                    status = None
+                    try:
+                        status = int(record['current_status']) if record['current_status'] else None
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # 转换driver_id为int（如果转换失败则为NULL）
+                    driver_id = None
+                    try:
+                        driver_id = int(record['driver_id']) if record['driver_id'] else None
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # route可以从order_id提取，或者设为NULL
+                    # 这里假设route可能需要从order_id或其他逻辑获取，暂时设为NULL
+                    route = None
+                    
+                    # team_name暂时设为NULL，如果需要可以从其他表关联获取
+                    team_name = None
+                    
+                    # if_driver_lost暂时设为NULL，需要根据业务逻辑确定
+                    if_driver_lost = None
+                    
+                    # 直接插入数据（因为已经清空了表，不需要检查是否存在）
+                    await conn.execute("""
+                        INSERT INTO weekly_inactivity (
+                            warehouse, tno, nonupdated_start_date, status, 
+                            route, driver_id, team_name, if_driver_lost, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                    """,
+                        warehouse,
+                        tracking_number,
+                        nonupdated_start_date,
+                        status,
+                        route,
+                        driver_id,
+                        team_name,
+                        if_driver_lost
+                    )
+                    inserted_count += 1
+                except Exception as e:
+                    print(f"❌ 插入记录失败: {e}, tracking_number: {record.get('tracking_number', 'unknown')}")
+                    continue
+            
+            print(f"✅ 周报生成任务完成，共插入 {inserted_count} 条记录到 weekly_inactivity 表")
+            return inserted_count
+    
+    except Exception as e:
+        print(f"❌ 周报生成任务执行失败: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return 0
 
 
 @app.on_event("startup")
@@ -291,19 +471,41 @@ async def startup():
         # 每小时执行一次（可以根据需要调整）
         # 例如：每天凌晨2点执行 -> CronTrigger(hour=2, minute=0)
         # 每30分钟执行一次 -> CronTrigger(minute='*/30')
+        # 添加获取扫描记录的定时任务（每天凌晨2点执行）
         scheduler.add_job(
             fetch_and_save_scan_records,
-            trigger=CronTrigger(hour='2', minute=0),  # 每小时整点执行
+            trigger=CronTrigger(hour='2', minute=0),  # 每天凌晨2点执行
             id='fetch_scan_records',
             name='获取扫描记录定时任务',
+            max_instances=1,
             replace_existing=True
         )
+        
+        # 添加清理旧数据的定时任务（每天凌晨1点执行）
+        scheduler.add_job(
+            cleanup_old_scan_records,
+            trigger=CronTrigger(hour='1', minute=0),  # 每天凌晨1点执行
+            id='cleanup_old_records',
+            name='清理超过15天的扫描记录',
+            max_instances=1,
+            replace_existing=True
+        )
+        
+        # 添加周报生成定时任务（每周日执行）
+        scheduler.add_job(
+            generate_weekly_inactivity_report,
+            trigger=CronTrigger(day_of_week=6, hour=5, minute=0),  # 每周日凌晨0点执行
+            id='generate_weekly_inactivity',
+            name='生成周报数据（weekly_inactivity）',
+            max_instances=1,
+            replace_existing=True
+        )
+        
         scheduler.start()
-        print("✅ Scheduler started - 定时任务将在每小时整点执行")
-        
-        # 启动时立即执行一次
-        asyncio.create_task(fetch_and_save_scan_records())
-        
+        print("✅ Scheduler started")
+        print("  - 获取扫描记录任务：每天凌晨2点执行")
+        print("  - 清理旧数据任务：每天凌晨1点执行")
+        print("  - 周报生成任务：每周日凌晨0点执行")
         print("✅ Application startup completed")
     except Exception as e:
         print(f"❌ Application startup failed: {e}")
@@ -454,21 +656,39 @@ async def health():
     return {"status": "ok"}
 
 
-# 手动触发定时任务端点（用于测试）
-@app.post("/api/cron/trigger-scan-records")
-async def trigger_scan_records():
-    """手动触发扫描记录定时任务（用于测试）"""
+# 手动触发清理任务端点（用于测试）
+@app.post("/api/cron/trigger-cleanup")
+async def trigger_cleanup():
+    """手动触发清理旧数据定时任务（用于测试）"""
     try:
-        # 在后台执行定时任务
-        asyncio.create_task(fetch_and_save_scan_records())
+        # 在后台执行清理任务
+        asyncio.create_task(cleanup_old_scan_records())
         return {
             "status": "success",
-            "message": "定时任务已触发，正在后台执行"
+            "message": "清理任务已触发，正在后台执行"
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"触发定时任务失败: {str(e)}"
+            detail=f"触发清理任务失败: {str(e)}"
+        )
+
+
+# 手动触发周报生成任务端点（用于测试）
+@app.post("/api/cron/trigger-weekly-report")
+async def trigger_weekly_report():
+    """手动触发周报生成定时任务（用于测试）"""
+    try:
+        # 在后台执行周报生成任务
+        asyncio.create_task(generate_weekly_inactivity_report())
+        return {
+            "status": "success",
+            "message": "周报生成任务已触发，正在后台执行"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"触发周报生成任务失败: {str(e)}"
         )
 
 
