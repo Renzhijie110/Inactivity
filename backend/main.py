@@ -1,6 +1,7 @@
 import os
 import asyncio
 import secrets
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Query, Depends, status, Header, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,8 @@ from pydantic import BaseModel
 import asyncpg
 import httpx
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 load_dotenv()
 
@@ -37,6 +40,9 @@ app.add_middleware(
 # Database connection pool
 db_pool: Optional[asyncpg.Pool] = None
 
+# Scheduler for cron jobs
+scheduler: Optional[AsyncIOScheduler] = None
+
 
 async def get_db_pool() -> asyncpg.Pool:
     """Get or create database connection pool"""
@@ -56,11 +62,216 @@ async def get_db_pool() -> asyncpg.Pool:
     return db_pool
 
 
+async def init_database_tables():
+    """初始化数据库表结构"""
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            # 创建扫描记录表
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_records (
+                    id SERIAL PRIMARY KEY,
+                    tracking_number VARCHAR(255),
+                    order_id VARCHAR(255),
+                    warehouse VARCHAR(255),
+                    zone VARCHAR(255),
+                    driver_id VARCHAR(255),
+                    current_status VARCHAR(255),
+                    nonupdated_start_timestamp TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tracking_number, order_id, warehouse, nonupdated_start_timestamp)
+                )
+            """)
+            
+            # 创建索引以提高查询性能
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_records_tracking_number 
+                ON scan_records(tracking_number)
+            """)
+            
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_records_warehouse 
+                ON scan_records(warehouse)
+            """)
+            
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_scan_records_created_at 
+                ON scan_records(created_at)
+            """)
+            
+            print("✅ Database tables initialized successfully")
+    except Exception as e:
+        print(f"❌ Failed to initialize database tables: {e}")
+        raise
+
+
+async def get_external_api_token() -> Optional[str]:
+    """获取外部API的认证token"""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{EXTERNAL_API_BASE}/api/v1/auth/token",
+                data={
+                    "username": DEFAULT_USERNAME,
+                    "password": DEFAULT_PASSWORD
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "accept": "application/json"
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                response_data = response.json()
+                return response_data.get("access_token")
+            else:
+                print(f"❌ Failed to get external API token: {response.status_code}")
+                return None
+    except Exception as e:
+        print(f"❌ Error getting external API token: {e}")
+        return None
+
+
+async def fetch_and_save_scan_records():
+    """定时任务：获取扫描记录并写入数据库"""
+    print(f"[{datetime.now()}] 开始执行定时任务：获取扫描记录...")
+    
+    try:
+        # 获取认证token
+        token = await get_external_api_token()
+        if not token:
+            print("❌ 无法获取认证token，跳过本次任务")
+            return
+        
+        pool = await get_db_pool()
+        async with httpx.AsyncClient() as client:
+            page = 1
+            page_size = 100
+            total_saved = 0
+            
+            while True:
+                # 获取扫描记录（不指定warehouse，获取所有仓库的数据）
+                params = {
+                    "show_cancelled": "false",
+                    "page": page,
+                    "page_size": page_size,
+                    "sort": "nonupdated_start_timestamp",
+                    "order": "desc"
+                }
+                
+                response = await client.get(
+                    f"{EXTERNAL_API_BASE}/api/v1/scan-records/weekly",
+                    params=params,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "accept": "application/json"
+                    },
+                    timeout=30.0
+                )
+                
+                if response.status_code != 200:
+                    print(f"❌ 获取扫描记录失败: {response.status_code}")
+                    break
+                
+                data = response.json()
+                items = data.get("data") or data.get("items") or []
+                
+                if not items or len(items) == 0:
+                    break
+                
+                # 批量插入数据库
+                async with pool.acquire() as conn:
+                    for item in items:
+                        try:
+                            # 解析时间戳
+                            timestamp_str = item.get("nonupdated_start_timestamp")
+                            timestamp = None
+                            if timestamp_str:
+                                try:
+                                    # 尝试解析ISO格式的时间戳
+                                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                                except:
+                                    try:
+                                        timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                                    except:
+                                        pass
+                            
+                            # 使用 INSERT ... ON CONFLICT 来避免重复插入
+                            await conn.execute("""
+                                INSERT INTO scan_records (
+                                    tracking_number, order_id, warehouse, zone, 
+                                    driver_id, current_status, nonupdated_start_timestamp, updated_at
+                                ) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+                                ON CONFLICT (tracking_number, order_id, warehouse, nonupdated_start_timestamp)
+                                DO UPDATE SET
+                                    zone = EXCLUDED.zone,
+                                    driver_id = EXCLUDED.driver_id,
+                                    current_status = EXCLUDED.current_status,
+                                    updated_at = CURRENT_TIMESTAMP
+                            """,
+                                item.get("tracking_number"),
+                                item.get("order_id"),
+                                item.get("warehouse"),
+                                item.get("zone"),
+                                item.get("driver_id"),
+                                item.get("current_status"),
+                                timestamp
+                            )
+                            total_saved += 1
+                        except Exception as e:
+                            print(f"❌ 保存记录失败: {e}, item: {item.get('tracking_number', 'unknown')}")
+                            continue
+                
+                # 检查是否还有更多页面
+                pagination = data.get("pagination", {})
+                total_pages = pagination.get("total_pages")
+                if not total_pages:
+                    # 如果没有分页信息，尝试从total计算
+                    total = pagination.get("total") or data.get("total", 0)
+                    if total > 0:
+                        total_pages = (total + page_size - 1) // page_size
+                    else:
+                        total_pages = 1
+                
+                if page >= total_pages:
+                    break
+                
+                page += 1
+            
+            print(f"✅ 定时任务完成，共保存 {total_saved} 条记录")
+    
+    except Exception as e:
+        print(f"❌ 定时任务执行失败: {e}")
+
+
 @app.on_event("startup")
 async def startup():
-    """Initialize database pool on startup"""
+    """Initialize database pool and start scheduler on startup"""
+    global scheduler
     try:
         await get_db_pool()
+        await init_database_tables()
+        
+        # 初始化并启动定时任务调度器
+        scheduler = AsyncIOScheduler()
+        # 每小时执行一次（可以根据需要调整）
+        # 例如：每天凌晨2点执行 -> CronTrigger(hour=2, minute=0)
+        # 每30分钟执行一次 -> CronTrigger(minute='*/30')
+        scheduler.add_job(
+            fetch_and_save_scan_records,
+            trigger=CronTrigger(hour='2', minute=0),  # 每小时整点执行
+            id='fetch_scan_records',
+            name='获取扫描记录定时任务',
+            replace_existing=True
+        )
+        scheduler.start()
+        print("✅ Scheduler started - 定时任务将在每小时整点执行")
+        
+        # 启动时立即执行一次
+        asyncio.create_task(fetch_and_save_scan_records())
+        
         print("✅ Application startup completed")
     except Exception as e:
         print(f"❌ Application startup failed: {e}")
@@ -70,8 +281,15 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    """Close database pool on shutdown"""
-    global db_pool
+    """Close database pool and scheduler on shutdown"""
+    global db_pool, scheduler
+    if scheduler:
+        try:
+            scheduler.shutdown()
+            print("✅ Scheduler stopped")
+        except Exception as e:
+            print(f"Error stopping scheduler: {e}")
+    
     if db_pool:
         try:
             await db_pool.close()
