@@ -157,7 +157,11 @@ async def proxy_login(
                     detail=error_data.get("detail", "登录失败")
                 )
             
-            return response.json()
+            response_data = response.json()
+            return {
+                "access_token": response_data.get("access_token", ""),
+                "token_type": response_data.get("token_type", "bearer")
+            }
     except httpx.RequestError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -263,119 +267,3 @@ async def proxy_scan_records(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"无法连接到外部API: {str(e)}"
         )
-
-
-# 仓库相关API端点（需要认证）
-@app.get("/api/warehouse/warehouses")
-async def get_warehouses(current_user: str = Depends(get_current_user)):
-    """获取仓库列表"""
-    try:
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch("""
-                SELECT warehouse as code, COUNT(*) as count
-                FROM items
-                WHERE warehouse IS NOT NULL AND warehouse != ''
-                GROUP BY warehouse
-                ORDER BY warehouse
-            """)
-            warehouses = [{"code": row["code"], "count": row["count"]} for row in rows]
-            return {"success": True, "warehouses": warehouses}
-    except Exception as e:
-        print(f"Error fetching warehouses: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/warehouse/items")
-async def get_items(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100),
-    warehouse: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
-    current_user: str = Depends(get_current_user)
-):
-    """获取物品列表"""
-    try:
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            # 构建查询条件
-            conditions = []
-            params = []
-            param_count = 0
-            
-            if warehouse:
-                param_count += 1
-                conditions.append(f"warehouse = ${param_count}")
-                params.append(warehouse)
-            
-            if search:
-                param_count += 1
-                search_param = f"%{search}%"
-                conditions.append(f"(tracking_number ILIKE ${param_count} OR order_id ILIKE ${param_count} OR driver_id ILIKE ${param_count})")
-                params.append(search_param)
-            
-            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
-            
-            # 获取总数
-            count_query = f"SELECT COUNT(*) FROM items {where_clause}"
-            total = await conn.fetchval(count_query, *params)
-            
-            # 获取分页数据
-            offset = (page - 1) * page_size
-            param_count += 1
-            params.append(page_size)
-            param_count += 1
-            params.append(offset)
-            
-            data_query = f"""
-                SELECT 
-                    id, tracking_number, order_id, warehouse, zone,
-                    driver_id, current_status, nonupdated_start_timestamp
-                FROM items
-                {where_clause}
-                ORDER BY id
-                LIMIT ${param_count - 1} OFFSET ${param_count}
-            """
-            rows = await conn.fetch(data_query, *params)
-            
-            items = []
-            for row in rows:
-                items.append({
-                    "id": row["id"],
-                    "tracking_number": row["tracking_number"],
-                    "order_id": row["order_id"],
-                    "warehouse": row["warehouse"],
-                    "zone": row["zone"],
-                    "driver_id": row["driver_id"],
-                    "current_status": row["current_status"],
-                    "nonupdated_start_timestamp": str(row["nonupdated_start_timestamp"]) if row["nonupdated_start_timestamp"] else None
-                })
-            
-            # 计算仓库统计
-            warehouse_stats = {}
-            if not warehouse and not search:
-                stats_query = """
-                    SELECT warehouse, COUNT(*) as count
-                    FROM items
-                    WHERE warehouse IS NOT NULL AND warehouse != ''
-                    GROUP BY warehouse
-                """
-                stats_rows = await conn.fetch(stats_query)
-                warehouse_stats = {row["warehouse"]: row["count"] for row in stats_rows}
-            
-            total_pages = (total + page_size - 1) // page_size
-            
-            return {
-                "success": True,
-                "data": items,
-                "pagination": {
-                    "page": page,
-                    "page_size": page_size,
-                    "total": total,
-                    "total_pages": total_pages
-                },
-                "warehouse_stats": warehouse_stats
-            }
-    except Exception as e:
-        print(f"Error fetching items: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
