@@ -165,7 +165,7 @@ async def get_external_api_authorization_optional(authorization: str = Header(No
 def verify_credentials(username: str, password: str) -> bool:
     """Verify user credentials."""
     # Special case: convert uni_staff/123456 to default credentials
-    if username == "uni_staff" and password == "123456":
+    if username == "" and password == "123456":
         username = settings.default_username
         password = settings.default_password
     
