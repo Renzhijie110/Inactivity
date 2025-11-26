@@ -1,7 +1,7 @@
 """Database connection and pool management."""
 import asyncpg
 from typing import Optional, List, Dict, Any
-from config import settings
+from .config import settings
 
 
 class Database:

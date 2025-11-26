@@ -1,9 +1,9 @@
 """Authentication routes."""
 from fastapi import APIRouter, HTTPException, Form, Depends, status
-from models import LoginRequest, TokenResponse, UserInfo
-from auth import create_token, get_current_user, verify_credentials, set_external_api_token
-from services.external_api import external_api_client
-from config import settings
+from ..models import LoginRequest, TokenResponse, UserInfo
+from ..auth import create_token, get_current_user, verify_credentials, set_external_api_token
+from ..services.external_api import external_api_client
+from ..config import settings
 
 router = APIRouter(prefix="/api", tags=["Authentication"])
 

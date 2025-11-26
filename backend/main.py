@@ -2,10 +2,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Use absolute imports since uvicorn runs from backend directory
-from config import settings
-from database import db
-from routers import auth, proxy, consjob
+from .config import settings
+from .database import db
+from .routers import auth, proxy, consjob
 
 app = FastAPI(
     title="FastAPI Application",

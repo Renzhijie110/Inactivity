@@ -1,7 +1,7 @@
 """Proxy routes for external API."""
 from fastapi import APIRouter, HTTPException, Query, Header, status
 from typing import Optional
-from services.external_api import external_api_client
+from ..services.external_api import external_api_client
 
 router = APIRouter(prefix="/api/v1", tags=["Proxy"])
 
