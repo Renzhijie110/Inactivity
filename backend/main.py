@@ -581,8 +581,28 @@ async def proxy_login(
     password: str = Form(...)
 ):
     """代理登录请求到外部API - 支持表单格式"""
-    # 如果输入的是 uni_staff/123456，转换为默认账号密码
-    if username == "uni_staff" and password == "123456":
+    # 保存原始用户名，用于返回给前端
+    original_username = username
+    # 如果输入的是配置的用户名和对应的随机密码，转换为默认账号密码  
+    if ((username == "uni_staff" and password == "Kp9mN2vQ7xRwZ5") or 
+    (username == "JFK" and password == "aB3cD5eF8gHiJ1") or 
+    (username == "EWR" and password == "jK2lM4nO6pQrS9") or 
+    (username == "PHL" and password == "sT7uV9wX1yZ2aB") or 
+    (username == "DCA" and password == "bC4dE6fG8hIjK3") or 
+    (username == "BOS" and password == "kL3mN5oP7qRsT0") or 
+    (username == "RDU" and password == "tU8vW0xY2zA3bC") or 
+    (username == "CLT" and password == "cD5eF7gH9iJkL4") or 
+    (username == "BUF" and password == "lM4nO6pQ8rStU1") or 
+    (username == "RIC" and password == "uV9wX1yZ3aB4cD") or 
+    (username == "PIT" and password == "dE6fG8hI0jKlM5") or 
+    (username == "MDT" and password == "mN5oP7qR9sTuV2") or 
+    (username == "ALB" and password == "vW0xY2zA4bC5dE") or 
+    (username == "SYR" and password == "eF7gH9iJ1kLmN6") or 
+    (username == "PWM" and password == "nO6pQ8rS0tUvW3") or 
+    (username == "MIA" and password == "wX1yZ3aB5cD6eF") or 
+    (username == "TPA" and password == "fG8hI0jK2lMnO7") or 
+    (username == "JAX" and password == "oP7qR9sT1uVwX4") or 
+    (username == "MCO" and password == "xY2zA4bC6dE7fG")):
         username = DEFAULT_USERNAME
         password = DEFAULT_PASSWORD
     
@@ -612,7 +632,8 @@ async def proxy_login(
             response_data = response.json()
             return {
                 "access_token": response_data.get("access_token", ""),
-                "token_type": response_data.get("token_type", "bearer")
+                "token_type": response_data.get("token_type", "bearer"),
+                "username": original_username  # 返回原始用户名，用于前端限制仓库选择
             }
     except httpx.RequestError as e:
         raise HTTPException(

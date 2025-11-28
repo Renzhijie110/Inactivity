@@ -6,8 +6,8 @@ import Login from './Login'
 // 使用自己的后端API（会代理到外部API）
 const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://3.143.253.2' : '')
 
-// 固定的仓库列表
-const WAREHOUSES = ['JFK', 'EWR', 'PHL', 'DCA', 'BOS', 'RDU', 'CLT', 'BUF', 'RIC', 'PIT', 'MDT', 'ALB', 'SYR', 'PWM']
+// 固定的仓库列表（与后端登录支持的用户名保持一致）
+const WAREHOUSES = ['JFK', 'EWR', 'PHL', 'DCA', 'BOS', 'RDU', 'CLT', 'BUF', 'RIC', 'PIT', 'MDT', 'ALB', 'SYR', 'PWM', 'MIA', 'TPA', 'JAX', 'MCO']
 
 // 受保护的路由组件
 function ProtectedRoute({ children }) {
@@ -19,8 +19,16 @@ function ProtectedRoute({ children }) {
 function Dashboard() {
   const navigate = useNavigate()
   const [token, setToken] = useState(localStorage.getItem('token') || null)
+  const [username, setUsername] = useState(localStorage.getItem('username') || '')
   const [items, setItems] = useState([])
-  const [selectedWarehouse, setSelectedWarehouse] = useState('')
+  // 根据用户名确定可用的仓库列表
+  const availableWarehouses = username && username !== 'uni_staff' && WAREHOUSES.includes(username) 
+    ? [username]  // 如果用户名是仓库名，只显示该仓库
+    : WAREHOUSES  // 否则显示所有仓库
+  // 如果用户名是仓库名，自动选中该仓库
+  const [selectedWarehouse, setSelectedWarehouse] = useState(
+    username && username !== 'uni_staff' && WAREHOUSES.includes(username) ? username : ''
+  )
   const [loading, setLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [pagination, setPagination] = useState({ page: 1, page_size: 10, total: 0, total_pages: 0 })
@@ -103,7 +111,9 @@ function Dashboard() {
 
   const handleLogout = () => {
     localStorage.removeItem('token')
+    localStorage.removeItem('username')
     setToken(null)
+    setUsername('')
     navigate('/login')
   }
 
@@ -266,10 +276,10 @@ function Dashboard() {
                 id="warehouse"
                 value={selectedWarehouse}
                 onChange={handleWarehouseChange}
-                disabled={loading}
+                disabled={loading || (availableWarehouses.length === 1)}
               >
                 <option value="">请选择仓库</option>
-                {WAREHOUSES.map(wh => (
+                {availableWarehouses.map(wh => (
                   <option key={wh} value={wh}>
                     {wh}
                   </option>

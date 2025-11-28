@@ -41,6 +41,10 @@ function Login({ onLogin }) {
 
       const data = await response.json()
       localStorage.setItem('token', data.access_token)
+      // 保存用户名，用于限制仓库选择
+      if (data.username) {
+        localStorage.setItem('username', data.username)
+      }
       onLogin(data.access_token)
       // 登录成功后跳转到主页面
       navigate('/dashboard')
