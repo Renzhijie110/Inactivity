@@ -602,7 +602,9 @@ async def proxy_login(
     (username == "MIA" and password == "wX1yZ3aB5cD6eF") or 
     (username == "TPA" and password == "fG8hI0jK2lMnO7") or 
     (username == "JAX" and password == "oP7qR9sT1uVwX4") or 
-    (username == "MCO" and password == "xY2zA4bC6dE7fG")):
+    (username == "MCO" and password == "xY2zA4bC6dE7fG") or
+    (username == "GNV" and password == "aB3cD5eF8gHiJ1") or
+    (username == "TLH" and password == "jK2lM4nO6pQrS9")):
         username = DEFAULT_USERNAME
         password = DEFAULT_PASSWORD
     

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import './App.css'
 import Login from './Login'
@@ -21,14 +21,54 @@ function Dashboard() {
   const [token, setToken] = useState(localStorage.getItem('token') || null)
   const [username, setUsername] = useState(localStorage.getItem('username') || '')
   const [items, setItems] = useState([])
+  
+  // 确保在组件挂载时从localStorage读取最新的username
+  useEffect(() => {
+    const storedUsername = localStorage.getItem('username') || ''
+    if (storedUsername) {
+      setUsername(storedUsername)
+    }
+  }, [])
+  
+  // 监听localStorage的变化（当从其他标签页登录时）
+  useEffect(() => {
+    const handleStorageChange = (e) => {
+      if (e.key === 'username' && e.newValue) {
+        setUsername(e.newValue)
+      }
+    }
+    window.addEventListener('storage', handleStorageChange)
+    return () => window.removeEventListener('storage', handleStorageChange)
+  }, [])
+  
   // 根据用户名确定可用的仓库列表
-  const availableWarehouses = username && username !== 'uni_staff' && WAREHOUSES.includes(username) 
-    ? [username]  // 如果用户名是仓库名，只显示该仓库
-    : WAREHOUSES  // 否则显示所有仓库
+  const availableWarehouses = useMemo(() => {
+    // 从localStorage直接读取，确保获取最新值
+    const currentUsername = localStorage.getItem('username') || username || ''
+    if (currentUsername && currentUsername !== 'uni_staff' && WAREHOUSES.includes(currentUsername)) {
+      // 如果用户名是仓库名，只显示该仓库
+      return [currentUsername]
+    }
+    // 否则显示所有仓库
+    return WAREHOUSES
+  }, [username])
+  
   // 如果用户名是仓库名，自动选中该仓库
-  const [selectedWarehouse, setSelectedWarehouse] = useState(
-    username && username !== 'uni_staff' && WAREHOUSES.includes(username) ? username : ''
-  )
+  const [selectedWarehouse, setSelectedWarehouse] = useState(() => {
+    const storedUsername = localStorage.getItem('username') || ''
+    if (storedUsername && storedUsername !== 'uni_staff' && WAREHOUSES.includes(storedUsername)) {
+      return storedUsername
+    }
+    return ''
+  })
+  
+  // 当username变化时，更新selectedWarehouse
+  useEffect(() => {
+    if (username && username !== 'uni_staff' && WAREHOUSES.includes(username)) {
+      setSelectedWarehouse(username)
+    }
+  }, [username])
+  
   const [loading, setLoading] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [pagination, setPagination] = useState({ page: 1, page_size: 10, total: 0, total_pages: 0 })
